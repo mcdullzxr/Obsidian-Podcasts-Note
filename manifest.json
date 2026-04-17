@@ -1,0 +1,10 @@
+{
+	"id": "podcast-note",
+	"name": "Podcast Note",
+	"version": "0.1.0",
+	"minAppVersion": "1.4.0",
+	"description": "把播客变成可搜索、可关联的知识笔记：粘贴小宇宙/RSS/Spotify 链接，自动生成逐字稿、摘要、知识点和大纲。",
+	"author": "45084",
+	"authorUrl": "",
+	"isDesktopOnly": false
+}
