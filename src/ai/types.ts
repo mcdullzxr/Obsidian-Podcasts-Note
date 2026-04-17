@@ -27,12 +27,27 @@ export interface TranscriptionResult {
 }
 
 /**
+ * 转录服务商。
+ * - openai: OpenAI Whisper 兼容接口（含硅基流动等）——multipart 上传，<25MB
+ * - volcengine: 火山引擎豆包录音文件识别——传 URL，提交+轮询，无大小限制
+ * - dashscope: 阿里云百炼 Paraformer——传 URL，提交+轮询，文件不超过 2GB
+ */
+export type WhisperProvider = "openai" | "volcengine" | "dashscope";
+
+/**
  * Whisper 配置（来自插件 settings）。
  */
 export interface WhisperConfig {
+	/** 服务商类型 */
+	provider: WhisperProvider;
+	/** API Key（火山新版控制台为 X-Api-Key，其他为 Bearer） */
 	apiKey: string;
-	baseUrl: string;
-	model: string;
+	/** 模型名称（openai/dashscope 使用，火山固定为 bigmodel） */
+	model?: string;
+	/** OpenAI 兼容服务的 base URL（仅 openai 类型使用） */
+	baseUrl?: string;
+	/** 火山资源 ID，如 volc.seedasr.auc / volc.bigasr.auc */
+	resourceId?: string;
 }
 
 /** OpenAI Whisper 单次上传上限 */

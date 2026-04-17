@@ -1,3 +1,4 @@
+import { requestUrl } from "obsidian";
 import type { InsightContext, LlmConfig, OutlineNode, PodcastInsights } from "./llm-types";
 
 /**
@@ -120,7 +121,27 @@ function normalizeInsights(raw: unknown): PodcastInsights {
 }
 
 /**
- * 调用 OpenAI 兼容的 Chat Completions API 生成结构化产出。
+ * 解析 chat completions 的完整 endpoint。
+ *
+ * 规则：
+ * - 如果用户填的 base URL 已经是完整路径（含 /chat/completions 或 /chatcompletion*），直接使用
+ * - 如果是 MiniMax 的 endpoint（api.minimaxi.com 且只到 /v1），拼接 MiniMax 专用路径
+ * - 其他情况按 OpenAI 标准拼接 /chat/completions
+ */
+function resolveChatEndpoint(baseUrl: string): string {
+	const trimmed = baseUrl.replace(/\/$/, "");
+	if (/\/(chat\/completions|chatcompletion_v2|chatcompletion_pro)$/i.test(trimmed)) {
+		return trimmed;
+	}
+	// MiniMax 国内版的 OpenAI 兼容路径是 /text/chatcompletion_v2
+	if (/api\.minimaxi?\.com\/v1$/i.test(trimmed)) {
+		return `${trimmed}/text/chatcompletion_v2`;
+	}
+	return `${trimmed}/chat/completions`;
+}
+
+/**
+ * 调用 LLM 生成结构化产出。按协议分发到 OpenAI 或 Anthropic 实现。
  */
 export async function generateInsights(
 	ctx: InsightContext,
@@ -130,7 +151,28 @@ export async function generateInsights(
 		throw new Error("未配置 LLM API Key，请到插件设置中填写");
 	}
 
-	const endpoint = `${config.baseUrl.replace(/\/$/, "")}/chat/completions`;
+	const rawContent =
+		config.protocol === "anthropic"
+			? await callAnthropic(ctx, config)
+			: await callOpenAI(ctx, config);
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(stripCodeFence(rawContent));
+	} catch (e) {
+		throw new Error(
+			`LLM 返回的不是合法 JSON，前 200 字符：${rawContent.slice(0, 200)}…`
+		);
+	}
+
+	return normalizeInsights(parsed);
+}
+
+/**
+ * OpenAI 兼容 Chat Completions 调用，返回 message.content 字符串。
+ */
+async function callOpenAI(ctx: InsightContext, config: LlmConfig): Promise<string> {
+	const endpoint = resolveChatEndpoint(config.baseUrl);
 
 	const body = {
 		model: config.model,
@@ -142,37 +184,97 @@ export async function generateInsights(
 		],
 	};
 
-	const response = await fetch(endpoint, {
+	const response = await requestUrl({
+		url: endpoint,
 		method: "POST",
 		headers: {
 			"Content-Type": "application/json",
 			Authorization: `Bearer ${config.apiKey}`,
 		},
 		body: JSON.stringify(body),
+		throw: false,
 	});
 
-	if (!response.ok) {
-		const errText = await response.text().catch(() => "");
-		throw new Error(`LLM API 调用失败 (${response.status})：${errText.slice(0, 300)}`);
+	if (response.status < 200 || response.status >= 300) {
+		throw new Error(
+			`LLM API 调用失败 (${response.status})：${(response.text || "").slice(0, 300)}`
+		);
 	}
 
-	const data = (await response.json()) as {
+	const data = response.json as {
 		choices?: Array<{ message?: { content?: string } }>;
 	};
 
 	const content = data.choices?.[0]?.message?.content;
 	if (!content) throw new Error("LLM 返回为空");
+	return content;
+}
 
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(stripCodeFence(content));
-	} catch (e) {
+/**
+ * Anthropic Messages API 调用（Claude 官方 / MiniMax Token Plan）。
+ *
+ * 关键差异：
+ * - endpoint: {baseUrl}/v1/messages
+ * - 鉴权：x-api-key + anthropic-version，不是 Bearer
+ * - system 是顶层字段，不是 messages 里的角色
+ * - 返回：content 是数组，首个 text block 的 .text 字段是正文
+ * - 没有 response_format，靠 prompt 约束 JSON
+ */
+async function callAnthropic(ctx: InsightContext, config: LlmConfig): Promise<string> {
+	const endpoint = resolveAnthropicEndpoint(config.baseUrl);
+
+	const body = {
+		model: config.model,
+		max_tokens: 8000,
+		temperature: 0.3,
+		system: buildSystemPrompt() + "\n\n请记住：只输出一个 JSON 对象，不要任何前后缀说明。",
+		messages: [
+			{ role: "user", content: buildUserPrompt(ctx) },
+		],
+	};
+
+	const response = await requestUrl({
+		url: endpoint,
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			"x-api-key": config.apiKey,
+			"anthropic-version": "2023-06-01",
+		},
+		body: JSON.stringify(body),
+		throw: false,
+	});
+
+	if (response.status < 200 || response.status >= 300) {
 		throw new Error(
-			`LLM 返回的不是合法 JSON，前 200 字符：${content.slice(0, 200)}…`
+			`LLM API 调用失败 (${response.status})：${(response.text || "").slice(0, 300)}`
 		);
 	}
 
-	return normalizeInsights(parsed);
+	const data = response.json as {
+		content?: Array<{ type?: string; text?: string }>;
+	};
+
+	// 取第一个 type === "text" 的 block 的文本。MiniMax M2.7 可能会有 thinking block 在前，要跳过。
+	const textBlock = (data.content || []).find((b) => b.type === "text" && b.text);
+	const content = textBlock?.text;
+	if (!content) throw new Error("LLM 返回为空（未找到 text block）");
+	return content;
+}
+
+/**
+ * Anthropic endpoint 解析。
+ * - 如果用户填的 base URL 已经以 /v1/messages 结尾，直接用
+ * - 否则拼 /v1/messages
+ *
+ * 示例：
+ *   https://api.anthropic.com → https://api.anthropic.com/v1/messages
+ *   https://api.minimaxi.com/anthropic → https://api.minimaxi.com/anthropic/v1/messages
+ */
+function resolveAnthropicEndpoint(baseUrl: string): string {
+	const trimmed = baseUrl.replace(/\/$/, "");
+	if (/\/v1\/messages$/i.test(trimmed)) return trimmed;
+	return `${trimmed}/v1/messages`;
 }
 
 /**

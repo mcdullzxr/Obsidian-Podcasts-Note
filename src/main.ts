@@ -10,15 +10,19 @@ import { renderNote, renderFilename } from "./generators/markdown";
  */
 interface PodcastNoteSettings {
 	// --- AI 服务配置（BYOK）---
-	llmProvider: "openai" | "deepseek" | "siliconflow" | "custom";
+	llmProvider: "openai" | "deepseek" | "siliconflow" | "minimax" | "claude" | "custom";
+	/** LLM 协议类型：openai 兼容 vs anthropic (Claude / MiniMax M2.7) */
+	llmProtocol: "openai" | "anthropic";
 	llmApiKey: string;
 	llmBaseUrl: string;
 	llmModel: string;
 
-	whisperProvider: "openai" | "siliconflow" | "custom";
+	whisperProvider: "openai" | "siliconflow" | "volcengine" | "dashscope" | "custom";
 	whisperApiKey: string;
 	whisperBaseUrl: string;
 	whisperModel: string;
+	/** 火山引擎专用：Resource ID（如 volc.seedasr.auc） */
+	whisperResourceId: string;
 
 	// --- 笔记输出配置 ---
 	notesFolder: string;
@@ -28,6 +32,7 @@ interface PodcastNoteSettings {
 
 const DEFAULT_SETTINGS: PodcastNoteSettings = {
 	llmProvider: "openai",
+	llmProtocol: "openai",
 	llmApiKey: "",
 	llmBaseUrl: "https://api.openai.com/v1",
 	llmModel: "gpt-4o-mini",
@@ -36,6 +41,7 @@ const DEFAULT_SETTINGS: PodcastNoteSettings = {
 	whisperApiKey: "",
 	whisperBaseUrl: "https://api.openai.com/v1",
 	whisperModel: "whisper-1",
+	whisperResourceId: "volc.seedasr.auc",
 
 	notesFolder: "Podcasts",
 	filenameTemplate: "{{date}}-{{title}}",
@@ -113,9 +119,11 @@ export default class PodcastNotePlugin extends Plugin {
 		let transcript;
 		try {
 			transcript = await transcribeAudio(meta.audioUrl, {
+				provider: this.mapWhisperProvider(this.settings.whisperProvider),
 				apiKey: this.settings.whisperApiKey,
 				baseUrl: this.settings.whisperBaseUrl,
 				model: this.settings.whisperModel,
+				resourceId: this.settings.whisperResourceId,
 			});
 		} catch (err) {
 			step2.hide();
@@ -138,6 +146,7 @@ export default class PodcastNotePlugin extends Plugin {
 					existingTags: this.collectExistingTags(),
 				},
 				{
+					protocol: this.settings.llmProtocol,
 					apiKey: this.settings.llmApiKey,
 					baseUrl: this.settings.llmBaseUrl,
 					model: this.settings.llmModel,
@@ -201,6 +210,18 @@ export default class PodcastNotePlugin extends Plugin {
 		const msg = err instanceof Error ? err.message : String(err);
 		new Notice(`${prefix}：${msg}`, 8000);
 		console.error(`[Podcast Note] ${prefix}:`, err);
+	}
+
+	/**
+	 * 把 UI 层的 provider 选项映射到 whisper dispatcher 支持的三种类型。
+	 * openai / siliconflow / custom 共用 OpenAI 兼容路径。
+	 */
+	private mapWhisperProvider(
+		uiProvider: PodcastNoteSettings["whisperProvider"]
+	): "openai" | "volcengine" | "dashscope" {
+		if (uiProvider === "volcengine") return "volcengine";
+		if (uiProvider === "dashscope") return "dashscope";
+		return "openai";
 	}
 }
 
@@ -287,12 +308,14 @@ class PodcastNoteSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("LLM 服务商")
-			.setDesc("选择你使用的 AI 服务商。DeepSeek、硅基流动等国内服务成本更低。")
+			.setDesc("选择你使用的 AI 服务商。DeepSeek、硅基流动成本低；MiniMax Token Plan 走 Anthropic 协议。")
 			.addDropdown((dd) =>
 				dd
 					.addOption("openai", "OpenAI")
 					.addOption("deepseek", "DeepSeek")
 					.addOption("siliconflow", "硅基流动")
+					.addOption("minimax", "MiniMax（Token Plan / Anthropic）")
+					.addOption("claude", "Claude 官方")
 					.addOption("custom", "自定义（OpenAI 兼容）")
 					.setValue(this.plugin.settings.llmProvider)
 					.onChange(async (value) => {
@@ -300,6 +323,22 @@ class PodcastNoteSettingTab extends PluginSettingTab {
 						this.applyProviderDefaults("llm", value);
 						await this.plugin.saveSettings();
 						this.display();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("LLM 协议")
+			.setDesc(
+				"OpenAI 兼容: 大多数服务商（OpenAI / DeepSeek / 硅基流动 / 自定义）。Anthropic: Claude 官方、MiniMax M2.7 / M2.5 / M2.1 / M2。"
+			)
+			.addDropdown((dd) =>
+				dd
+					.addOption("openai", "OpenAI 兼容（/chat/completions）")
+					.addOption("anthropic", "Anthropic（/v1/messages）")
+					.setValue(this.plugin.settings.llmProtocol)
+					.onChange(async (value) => {
+						this.plugin.settings.llmProtocol = value as PodcastNoteSettings["llmProtocol"];
+						await this.plugin.saveSettings();
 					})
 			);
 
@@ -344,19 +383,24 @@ class PodcastNoteSettingTab extends PluginSettingTab {
 			);
 
 		// ============ Whisper 配置 ============
-		containerEl.createEl("h3", { text: "语音转录（Whisper）" });
+		containerEl.createEl("h3", { text: "语音转录" });
 
 		new Setting(containerEl)
 			.setName("转录服务商")
-			.setDesc("可与 LLM 使用不同服务商。硅基流动提供 Whisper 免费/低价选项。")
+			.setDesc(
+				"火山引擎 / 通义（DashScope）支持 URL 直接提交，无大小限制，推荐用于长播客。"
+			)
 			.addDropdown((dd) =>
 				dd
-					.addOption("openai", "OpenAI Whisper")
+					.addOption("volcengine", "火山引擎（豆包）")
+					.addOption("dashscope", "通义（阿里云 Paraformer）")
 					.addOption("siliconflow", "硅基流动")
-					.addOption("custom", "自定义")
+					.addOption("openai", "OpenAI Whisper")
+					.addOption("custom", "自定义（OpenAI 兼容）")
 					.setValue(this.plugin.settings.whisperProvider)
 					.onChange(async (value) => {
-						this.plugin.settings.whisperProvider = value as PodcastNoteSettings["whisperProvider"];
+						this.plugin.settings.whisperProvider =
+							value as PodcastNoteSettings["whisperProvider"];
 						this.applyProviderDefaults("whisper", value);
 						await this.plugin.saveSettings();
 						this.display();
@@ -365,6 +409,13 @@ class PodcastNoteSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Whisper API Key")
+			.setDesc(
+				this.plugin.settings.whisperProvider === "volcengine"
+					? "火山新版控制台的 API Key（以 X-Api-Key 方式鉴权）。"
+					: this.plugin.settings.whisperProvider === "dashscope"
+						? "阿里云百炼（DashScope）的 API Key。"
+						: "OpenAI 兼容服务的 API Key。"
+			)
 			.addText((text) => {
 				text.inputEl.type = "password";
 				text
@@ -376,29 +427,63 @@ class PodcastNoteSettingTab extends PluginSettingTab {
 					});
 			});
 
-		new Setting(containerEl)
-			.setName("Whisper Base URL")
-			.addText((text) =>
-				text
-					.setPlaceholder("https://api.openai.com/v1")
-					.setValue(this.plugin.settings.whisperBaseUrl)
-					.onChange(async (value) => {
-						this.plugin.settings.whisperBaseUrl = value.trim();
-						await this.plugin.saveSettings();
-					})
-			);
+		// 仅火山显示 Resource ID
+		if (this.plugin.settings.whisperProvider === "volcengine") {
+			new Setting(containerEl)
+				.setName("火山 Resource ID")
+				.setDesc(
+					"volc.seedasr.auc = 豆包 2.0（推荐，效果更好）；volc.bigasr.auc = 豆包 1.0。"
+				)
+				.addText((text) =>
+					text
+						.setPlaceholder("volc.seedasr.auc")
+						.setValue(this.plugin.settings.whisperResourceId)
+						.onChange(async (value) => {
+							this.plugin.settings.whisperResourceId =
+								value.trim() || "volc.seedasr.auc";
+							await this.plugin.saveSettings();
+						})
+				);
+		}
 
-		new Setting(containerEl)
-			.setName("Whisper 模型")
-			.addText((text) =>
-				text
-					.setPlaceholder("whisper-1")
-					.setValue(this.plugin.settings.whisperModel)
-					.onChange(async (value) => {
-						this.plugin.settings.whisperModel = value.trim();
-						await this.plugin.saveSettings();
-					})
-			);
+		// 仅 OpenAI 兼容模式显示 Base URL
+		if (
+			this.plugin.settings.whisperProvider === "openai" ||
+			this.plugin.settings.whisperProvider === "siliconflow" ||
+			this.plugin.settings.whisperProvider === "custom"
+		) {
+			new Setting(containerEl)
+				.setName("Whisper Base URL")
+				.addText((text) =>
+					text
+						.setPlaceholder("https://api.openai.com/v1")
+						.setValue(this.plugin.settings.whisperBaseUrl)
+						.onChange(async (value) => {
+							this.plugin.settings.whisperBaseUrl = value.trim();
+							await this.plugin.saveSettings();
+						})
+				);
+		}
+
+		// 火山固定为 bigmodel，不需要模型字段
+		if (this.plugin.settings.whisperProvider !== "volcengine") {
+			new Setting(containerEl)
+				.setName("Whisper 模型")
+				.setDesc(
+					this.plugin.settings.whisperProvider === "dashscope"
+						? "推荐 paraformer-v2（支持中文多方言 + 英日韩）。"
+						: "OpenAI: whisper-1；硅基流动: FunAudioLLM/SenseVoiceSmall"
+				)
+				.addText((text) =>
+					text
+						.setPlaceholder("whisper-1")
+						.setValue(this.plugin.settings.whisperModel)
+						.onChange(async (value) => {
+							this.plugin.settings.whisperModel = value.trim();
+							await this.plugin.saveSettings();
+						})
+				);
+		}
 
 		// ============ 笔记输出 ============
 		containerEl.createEl("h3", { text: "笔记输出" });
@@ -448,16 +533,30 @@ class PodcastNoteSettingTab extends PluginSettingTab {
 		if (kind === "llm") {
 			switch (provider) {
 				case "openai":
+					s.llmProtocol = "openai";
 					s.llmBaseUrl = "https://api.openai.com/v1";
 					s.llmModel = "gpt-4o-mini";
 					break;
 				case "deepseek":
+					s.llmProtocol = "openai";
 					s.llmBaseUrl = "https://api.deepseek.com/v1";
 					s.llmModel = "deepseek-chat";
 					break;
 				case "siliconflow":
+					s.llmProtocol = "openai";
 					s.llmBaseUrl = "https://api.siliconflow.cn/v1";
 					s.llmModel = "Qwen/Qwen2.5-7B-Instruct";
+					break;
+				case "minimax":
+					// MiniMax Token Plan 主推 Anthropic 协议 + MiniMax-M2.7
+					s.llmProtocol = "anthropic";
+					s.llmBaseUrl = "https://api.minimaxi.com/anthropic";
+					s.llmModel = "MiniMax-M2.7";
+					break;
+				case "claude":
+					s.llmProtocol = "anthropic";
+					s.llmBaseUrl = "https://api.anthropic.com";
+					s.llmModel = "claude-3-5-sonnet-latest";
 					break;
 			}
 		} else {
@@ -469,6 +568,14 @@ class PodcastNoteSettingTab extends PluginSettingTab {
 				case "siliconflow":
 					s.whisperBaseUrl = "https://api.siliconflow.cn/v1";
 					s.whisperModel = "FunAudioLLM/SenseVoiceSmall";
+					break;
+				case "volcengine":
+					// 火山不需要 baseUrl/model，由 provider 实现固定
+					s.whisperResourceId = s.whisperResourceId || "volc.seedasr.auc";
+					break;
+				case "dashscope":
+					// DashScope 端点固定，只需 Key + 模型
+					s.whisperModel = "paraformer-v2";
 					break;
 			}
 		}

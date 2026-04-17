@@ -32,7 +32,16 @@ export interface OutlineNode {
 	children?: OutlineNode[];
 }
 
+/**
+ * LLM 协议类型。
+ * - openai: /chat/completions 标准格式（OpenAI / DeepSeek / 硕基流动 / MiniMax M2-her / 温度等）
+ * - anthropic: /v1/messages 格式（Claude 官方 / MiniMax M2.7 等通过 Anthropic 协议的服务商）
+ */
+export type LlmProtocol = "openai" | "anthropic";
+
 export interface LlmConfig {
+	/** 协议类型，决定 endpoint/鉴权/序列化格式 */
+	protocol: LlmProtocol;
 	apiKey: string;
 	baseUrl: string;
 	model: string;
