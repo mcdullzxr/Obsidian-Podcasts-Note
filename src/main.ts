@@ -1,4 +1,5 @@
 import { App, Plugin, PluginSettingTab, Setting, Notice, Modal, TextComponent } from "obsidian";
+import { parsePodcastUrl } from "./parsers";
 
 /**
  * 插件设置项
@@ -80,19 +81,42 @@ export default class PodcastNotePlugin extends Plugin {
 
 	/**
 	 * 处理播客链接的主流程入口（骨架）。
-	 * 实际的解析、转录、AI 提炼将在后续迭代中实现。
+	 * 实际的转录、AI 提炼、笔记生成将在后续迭代中实现。
 	 */
 	private async handlePodcastUrl(url: string): Promise<void> {
 		if (!url) {
 			new Notice("请输入播客链接");
 			return;
 		}
-		new Notice(`收到链接：${url}\n解析与转录功能待实现`);
-		// TODO:
-		// 1. parsers/ 识别平台并提取元数据
-		// 2. ai/whisper 下载音频并转录
-		// 3. ai/llm 生成摘要、知识点、大纲
-		// 4. generators/markdown 写入 Vault
+
+		const notice = new Notice("正在解析播客元数据…", 0);
+		try {
+			const meta = await parsePodcastUrl(url);
+			notice.hide();
+
+			const info = [
+				`📻 ${meta.podcastName}`,
+				`🎙️ ${meta.title}`,
+				`📅 ${meta.publishDate}`,
+				meta.duration ? `⏱️ ${meta.duration}` : null,
+				`🔊 ${meta.audioUrl.slice(0, 60)}…`,
+			]
+				.filter(Boolean)
+				.join("\n");
+
+			new Notice(`解析成功！\n${info}\n\n（转录与笔记生成功能待实现）`, 8000);
+			console.log("[Podcast Note] parsed metadata:", meta);
+
+			// TODO:
+			// 1. ai/whisper 下载音频并转录
+			// 2. ai/llm 生成摘要、知识点、大纲
+			// 3. generators/markdown 写入 Vault
+		} catch (err) {
+			notice.hide();
+			const msg = err instanceof Error ? err.message : String(err);
+			new Notice(`解析失败：${msg}`, 6000);
+			console.error("[Podcast Note] parse error:", err);
+		}
 	}
 }
 
