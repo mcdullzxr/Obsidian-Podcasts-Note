@@ -1,5 +1,8 @@
-import { App, Plugin, PluginSettingTab, Setting, Notice, Modal, TextComponent } from "obsidian";
+import { App, Plugin, PluginSettingTab, Setting, Notice, Modal, TextComponent, TFile, normalizePath, getAllTags } from "obsidian";
 import { parsePodcastUrl } from "./parsers";
+import { transcribeAudio } from "./ai/whisper";
+import { generateInsights, segmentsToPromptText } from "./ai/llm";
+import { renderNote, renderFilename } from "./generators/markdown";
 
 /**
  * 插件设置项
@@ -80,8 +83,11 @@ export default class PodcastNotePlugin extends Plugin {
 	}
 
 	/**
-	 * 处理播客链接的主流程入口（骨架）。
-	 * 实际的转录、AI 提炼、笔记生成将在后续迭代中实现。
+	 * 处理播客链接的主流程入口。
+	 * 1. 解析元数据
+	 * 2. 下载音频 + Whisper 转录
+	 * 3. LLM 生成结构化产出
+	 * 4. 渲染 Markdown 并写入 Vault
 	 */
 	private async handlePodcastUrl(url: string): Promise<void> {
 		if (!url) {
@@ -89,34 +95,112 @@ export default class PodcastNotePlugin extends Plugin {
 			return;
 		}
 
-		const notice = new Notice("正在解析播客元数据…", 0);
+		// ========= 1. 解析元数据 =========
+		const step1 = new Notice("📡 正在解析播客页面…", 0);
+		let meta;
 		try {
-			const meta = await parsePodcastUrl(url);
-			notice.hide();
-
-			const info = [
-				`📻 ${meta.podcastName}`,
-				`🎙️ ${meta.title}`,
-				`📅 ${meta.publishDate}`,
-				meta.duration ? `⏱️ ${meta.duration}` : null,
-				`🔊 ${meta.audioUrl.slice(0, 60)}…`,
-			]
-				.filter(Boolean)
-				.join("\n");
-
-			new Notice(`解析成功！\n${info}\n\n（转录与笔记生成功能待实现）`, 8000);
-			console.log("[Podcast Note] parsed metadata:", meta);
-
-			// TODO:
-			// 1. ai/whisper 下载音频并转录
-			// 2. ai/llm 生成摘要、知识点、大纲
-			// 3. generators/markdown 写入 Vault
+			meta = await parsePodcastUrl(url);
 		} catch (err) {
-			notice.hide();
-			const msg = err instanceof Error ? err.message : String(err);
-			new Notice(`解析失败：${msg}`, 6000);
-			console.error("[Podcast Note] parse error:", err);
+			step1.hide();
+			this.notifyError("解析失败", err);
+			return;
 		}
+		step1.hide();
+		new Notice(`✅ 已识别：${meta.podcastName} · ${meta.title}`, 3000);
+
+		// ========= 2. 转录 =========
+		const step2 = new Notice("🎙️ 正在下载音频并转录（可能需要数分钟）…", 0);
+		let transcript;
+		try {
+			transcript = await transcribeAudio(meta.audioUrl, {
+				apiKey: this.settings.whisperApiKey,
+				baseUrl: this.settings.whisperBaseUrl,
+				model: this.settings.whisperModel,
+			});
+		} catch (err) {
+			step2.hide();
+			this.notifyError("转录失败", err);
+			return;
+		}
+		step2.hide();
+		new Notice(`✅ 转录完成（${transcript.segments.length} 段）`, 3000);
+
+		// ========= 3. LLM 提炼 =========
+		const step3 = new Notice("🧠 正在生成摘要、知识点、大纲…", 0);
+		let insights;
+		try {
+			insights = await generateInsights(
+				{
+					podcastName: meta.podcastName,
+					episodeTitle: meta.title,
+					description: meta.description,
+					transcriptWithTimestamps: segmentsToPromptText(transcript.segments),
+					existingTags: this.collectExistingTags(),
+				},
+				{
+					apiKey: this.settings.llmApiKey,
+					baseUrl: this.settings.llmBaseUrl,
+					model: this.settings.llmModel,
+				}
+			);
+		} catch (err) {
+			step3.hide();
+			this.notifyError("AI 提炼失败", err);
+			return;
+		}
+		step3.hide();
+
+		// ========= 4. 写入笔记 =========
+		try {
+			const body = renderNote(meta, insights, transcript, {
+				filenameTemplate: this.settings.filenameTemplate,
+				includeTranscript: this.settings.includeTranscript,
+			});
+			const file = await this.writeNote(meta, body);
+			new Notice(`🎉 笔记已生成：${file.path}`, 5000);
+			this.app.workspace.getLeaf(false).openFile(file);
+		} catch (err) {
+			this.notifyError("笔记写入失败", err);
+		}
+	}
+
+	/**
+	 * 收集 Vault 中所有已有的标签，用于 LLM 标签复用。
+	 */
+	private collectExistingTags(): string[] {
+		const tagSet = new Set<string>();
+		for (const file of this.app.vault.getMarkdownFiles()) {
+			const cache = this.app.metadataCache.getFileCache(file);
+			if (!cache) continue;
+			const tags = getAllTags(cache) || [];
+			for (const t of tags) tagSet.add(t.replace(/^#/, ""));
+		}
+		return Array.from(tagSet).sort();
+	}
+
+	/**
+	 * 把笔记内容写入 Vault，自动确保文件夹存在并处理重名。
+	 */
+	private async writeNote(meta: Awaited<ReturnType<typeof parsePodcastUrl>>, body: string): Promise<TFile> {
+		const folder = normalizePath(this.settings.notesFolder || "Podcasts");
+		if (!(await this.app.vault.adapter.exists(folder))) {
+			await this.app.vault.createFolder(folder);
+		}
+
+		const baseName = renderFilename(meta, this.settings.filenameTemplate);
+		let finalPath = normalizePath(`${folder}/${baseName}.md`);
+		let counter = 1;
+		while (await this.app.vault.adapter.exists(finalPath)) {
+			finalPath = normalizePath(`${folder}/${baseName} (${counter}).md`);
+			counter++;
+		}
+		return this.app.vault.create(finalPath, body);
+	}
+
+	private notifyError(prefix: string, err: unknown): void {
+		const msg = err instanceof Error ? err.message : String(err);
+		new Notice(`${prefix}：${msg}`, 8000);
+		console.error(`[Podcast Note] ${prefix}:`, err);
 	}
 }
 
