@@ -1,5 +1,5 @@
 import type { PodcastMetadata } from "../parsers/types";
-import type { PodcastInsights, InsightItem, OutlineNode } from "../ai/llm-types";
+import type { PodcastInsights, TopicCluster, OutlineNode } from "../ai/llm-types";
 import type { TranscriptionResult, TranscriptSegment } from "../ai/types";
 
 /**
@@ -8,13 +8,25 @@ import type { TranscriptionResult, TranscriptSegment } from "../ai/types";
 export interface NoteOptions {
 	filenameTemplate: string;
 	includeTranscript: boolean;
+
+	/**
+	 * 下载到本地的音频文件相对 Vault 根的完整路径（如 `Podcasts/attachments/xxx.mp3`）。
+	 * 传入后会把路径写入 frontmatter，供播放器定位本地文件。
+	 */
+	localAudioPath?: string;
+	/** 是否在笔记顶部嵌入 `![[xxx.mp3]]` 播放器（仅在 localAudioPath 存在时有效） */
+	embedAudioPlayer?: boolean;
+	/** 笔记保存目录（用于计算音频相对于笔记的链接路径，默认 Podcasts） */
+	notesFolder?: string;
+	/** 远程音频 URL（写入 frontmatter，供播放器回退使用） */
+	remoteAudioUrl?: string;
 }
 
 /**
  * 渲染整篇 Markdown 笔记。
  *
  * 按 CLAUDE.md 约定的结构：
- *   Frontmatter → 摘要 → 知识点 → 案例 → 大纲 → 逐字稿
+ *   Frontmatter → 顶部音频入口 → 摘要 → 知识点 → 案例 → 大纲 → 逐字稿
  */
 export function renderNote(
 	meta: PodcastMetadata,
@@ -24,16 +36,47 @@ export function renderNote(
 ): string {
 	const lines: string[] = [];
 
+	const audioBasename = opts.localAudioPath
+		? opts.localAudioPath.split("/").pop() || ""
+		: "";
+
 	// ===== Frontmatter =====
 	lines.push("---");
 	lines.push(`title: "${escapeYaml(meta.title)}"`);
 	lines.push(`podcast: "${escapeYaml(meta.podcastName)}"`);
 	lines.push(`date: ${meta.publishDate}`);
 	lines.push(`source: "${meta.sourceUrl}"`);
+	if (opts.localAudioPath) {
+		lines.push(`audio: "${opts.localAudioPath}"`);
+	}
+	if (opts.remoteAudioUrl) {
+		lines.push(`audio_url: "${opts.remoteAudioUrl}"`);
+	}
 	if (meta.duration) lines.push(`duration: "${meta.duration}"`);
 	lines.push(`tags: [${["播客", ...insights.tags].map(yamlTag).join(", ")}]`);
+	lines.push(`cssclasses: [podcast-note]`);
 	lines.push(`created: ${new Date().toISOString().slice(0, 10)}`);
 	lines.push("---");
+	lines.push("");
+
+	// ===== 顶部音频入口 =====
+	if (opts.localAudioPath && opts.embedAudioPlayer !== false) {
+		// Obsidian 嵌入语法：仅需文件名
+		lines.push(`![[${audioBasename}]]`);
+		lines.push("");
+	} else if (!opts.localAudioPath && meta.sourceUrl) {
+		lines.push(`> 🎧 [在${platformLabel(meta.platform)}收听原节目](${meta.sourceUrl})`);
+		lines.push("");
+	}
+
+	// ===== 元信息条（标签徽章 + 时长 + 节目名） =====
+	const infoParts: string[] = [];
+	if (meta.duration) infoParts.push(`⏱ ${meta.duration}`);
+	infoParts.push(`🎙 ${meta.podcastName}`);
+	if (insights.tags.length > 0) {
+		infoParts.push(insights.tags.map((t) => `\`${t}\``).join(" "));
+	}
+	lines.push(infoParts.join("  ·  "));
 	lines.push("");
 
 	// ===== 摘要 =====
@@ -42,24 +85,38 @@ export function renderNote(
 	lines.push(insights.summary || "（暂无摘要）");
 	lines.push("");
 
-	// ===== 知识点 =====
-	if (insights.knowledgePoints.length > 0) {
-		lines.push("## 💡 知识点");
+	// ===== 核心观点（话题聚类） =====
+	if (insights.topics.length > 0) {
+		lines.push("## 💡 核心观点");
 		lines.push("");
-		for (const item of insights.knowledgePoints) {
-			lines.push(...renderCallout("abstract", item));
+		for (const topic of insights.topics) {
+			lines.push(...renderTopic(topic));
 			lines.push("");
 		}
 	}
 
-	// ===== 案例 =====
-	if (insights.cases.length > 0) {
-		lines.push("## 📖 案例");
+	// ===== 行动建议（可选） =====
+	if (insights.actionItems.length > 0) {
+		lines.push("## ✅ 行动建议");
 		lines.push("");
-		for (const item of insights.cases) {
-			lines.push(...renderCallout("example", item));
-			lines.push("");
+		for (const item of insights.actionItems) {
+			const ts = item.startSeconds !== undefined ? ` ${tsLink(item.startSeconds)}` : "";
+			lines.push(`- [ ] ${item.content}${ts}`);
 		}
+		lines.push("");
+	}
+
+	// ===== 延伸阅读/资源（可选） =====
+	if (insights.resources.length > 0) {
+		lines.push("## 📚 延伸阅读");
+		lines.push("");
+		for (const res of insights.resources) {
+			const icon = resourceIcon(res.type);
+			const desc = res.description ? ` — ${res.description}` : "";
+			const ts = res.startSeconds !== undefined ? ` ${tsLink(res.startSeconds)}` : "";
+			lines.push(`- ${icon} **${res.name}**${desc}${ts}`);
+		}
+		lines.push("");
 	}
 
 	// ===== 大纲 =====
@@ -70,11 +127,18 @@ export function renderNote(
 		lines.push("");
 	}
 
-	// ===== 逐字稿 =====
+	// ===== 我的标记（空占位，供用户手动添加） =====
+	lines.push("## 🔖 我的标记");
+	lines.push("");
+
+	// ===== 逐字稿（默认折叠） =====
 	if (opts.includeTranscript && transcript && transcript.segments.length > 0) {
-		lines.push("## 📝 逐字稿");
-		lines.push("");
-		lines.push(...renderTranscript(transcript.segments));
+		lines.push("> [!note]- 📝 逐字稿（点击展开）");
+		lines.push(">");
+		const transcriptLines = renderTranscript(transcript.segments);
+		for (const tl of transcriptLines) {
+			lines.push(tl ? `> ${tl}` : ">");
+		}
 		lines.push("");
 	}
 
@@ -93,23 +157,65 @@ export function renderFilename(meta: PodcastMetadata, template: string): string 
 	return sanitizeFilename(raw);
 }
 
-function renderCallout(type: "abstract" | "example", item: InsightItem): string[] {
+/**
+ * 生成时间戳链接（解耦格式）：
+ * `[mm:ss](#t=秒)` — 只带时间不带路径。
+ * 播放器运行时自动匹配当前笔记对应的音频源。
+ */
+function tsLink(seconds: number): string {
+	const label = formatHMS(seconds);
+	const sec = Math.max(0, Math.floor(seconds));
+	return `[${label}](#t=${sec})`;
+}
+
+/**
+ * 渲染一个话题聚类：核心观点 + 案例佐证（如果有）。
+ */
+function renderTopic(topic: TopicCluster): string[] {
 	const out: string[] = [];
-	out.push(`> [!${type}] ${item.title}`);
-	for (const line of item.content.split("\n")) {
+
+	// 核心观点 callout
+	out.push(`> [!abstract] ${topic.title}`);
+	for (const line of topic.insight.split("\n")) {
 		out.push(`> ${line}`);
 	}
-	if (item.startSeconds !== undefined) {
-		out.push(`> ⏱️ ${formatHMS(item.startSeconds)}`);
+	if (topic.startSeconds !== undefined) {
+		out.push(`> ⏱️ ${tsLink(topic.startSeconds)}`);
 	}
+
+	// 案例佐证 callout（紧跟在观点后面）
+	if (topic.caseContent) {
+		out.push("");
+		out.push(`> [!example] ${topic.caseTitle || "案例"}`);
+		for (const line of topic.caseContent.split("\n")) {
+			out.push(`> ${line}`);
+		}
+		if (topic.caseStartSeconds !== undefined) {
+			out.push(`> ⏱️ ${tsLink(topic.caseStartSeconds)}`);
+		}
+	}
+
 	return out;
+}
+
+const RESOURCE_ICONS: Record<string, string> = {
+	book: "📖",
+	article: "📄",
+	tool: "🔧",
+	podcast: "🎙️",
+	other: "🔗",
+};
+
+function resourceIcon(type: string): string {
+	return RESOURCE_ICONS[type] || "🔗";
 }
 
 function renderOutline(nodes: OutlineNode[], depth: number): string[] {
 	const out: string[] = [];
 	const indent = "  ".repeat(depth);
 	for (const node of nodes) {
-		const ts = node.startSeconds !== undefined ? ` (${formatHMS(node.startSeconds)})` : "";
+		const ts =
+			node.startSeconds !== undefined ? ` (${tsLink(node.startSeconds)})` : "";
 		out.push(`${indent}- ${node.title}${ts}`);
 		if (node.children && node.children.length > 0) {
 			out.push(...renderOutline(node.children, depth + 1));
@@ -119,7 +225,7 @@ function renderOutline(nodes: OutlineNode[], depth: number): string[] {
 }
 
 /**
- * 渲染逐字稿：合并相邻短段，避免每 3 秒一行。
+ * 渲染逐字稿：合并相邻短段，避免每 3 秒一行；时间戳可点击跳转。
  */
 function renderTranscript(segments: TranscriptSegment[]): string[] {
 	const out: string[] = [];
@@ -130,9 +236,8 @@ function renderTranscript(segments: TranscriptSegment[]): string[] {
 
 	const flush = () => {
 		if (!bucketText.trim()) return;
-		const ts = formatHMS(bucketStart);
 		const speaker = bucketSpeaker ? `${bucketSpeaker}：` : "";
-		out.push(`**[${ts}]** ${speaker}${bucketText.trim()}`);
+		out.push(`**${tsLink(bucketStart)}** ${speaker}${bucketText.trim()}`);
 		out.push("");
 	};
 
@@ -172,6 +277,19 @@ function yamlTag(tag: string): string {
 		return `"${escapeYaml(tag)}"`;
 	}
 	return tag;
+}
+
+function platformLabel(platform: string): string {
+	switch (platform) {
+		case "xiaoyuzhou":
+			return "小宇宙";
+		case "spotify":
+			return "Spotify";
+		case "rss":
+			return "原站";
+		default:
+			return "原站";
+	}
 }
 
 /**

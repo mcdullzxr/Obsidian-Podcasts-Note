@@ -49,6 +49,15 @@ export async function transcribeDashScope(
 			parameters: {
 				channel_id: [0],
 				language_hints: ["zh", "en"],
+				// 说话人识别：默认不开，paraformer-v2 支持
+				...(config.enableSpeakerDiarization
+					? {
+							diarization_enabled: true,
+							...(config.speakerCount && config.speakerCount > 0
+								? { speaker_count: config.speakerCount }
+								: {}),
+						}
+					: {}),
 			},
 		}),
 		throw: false,
@@ -164,7 +173,11 @@ function parseDashScopeResult(data: unknown): TranscriptionResult {
 		start: toSeconds(s.begin_time),
 		end: toSeconds(s.end_time),
 		text: String(s.text || "").trim(),
-		speaker: s.speaker_id != null ? `S${s.speaker_id}` : undefined,
+		// 格式化为"发言人 N"（从 1 开始计数，与火山保持一致），未启用 diarization 时 speaker_id 一般不返回
+		speaker:
+			s.speaker_id != null && s.speaker_id !== ""
+				? `发言人 ${Number(s.speaker_id) + 1}`
+				: undefined,
 	}));
 
 	const fullText =

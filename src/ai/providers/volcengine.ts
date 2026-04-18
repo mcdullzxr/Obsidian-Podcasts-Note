@@ -70,6 +70,10 @@ export async function transcribeVolcengine(
 				enable_itn: true,
 				enable_punc: true,
 				show_utterances: true,
+				// 说话人识别：默认关，开启后 utterances[].additions.speaker 会返回说话人标识
+				...(config.enableSpeakerDiarization
+					? { enable_speaker_info: true }
+					: {}),
 			},
 		}),
 		throw: false,
@@ -137,6 +141,7 @@ function parseVolcResult(data: unknown): TranscriptionResult {
 		start: toSeconds(u.start_time),
 		end: toSeconds(u.end_time),
 		text: String(u.text || "").trim(),
+		speaker: extractSpeaker(u),
 	}));
 
 	const fullText =
@@ -156,6 +161,25 @@ function parseVolcResult(data: unknown): TranscriptionResult {
 function toSeconds(v: unknown): number {
 	const n = typeof v === "number" ? v : Number(v);
 	return Number.isFinite(n) ? n / 1000 : 0;
+}
+
+/**
+ * 从 utterance 中提取说话人标识，兼容多种返回格式。
+ * - BigASR: utterances[].additions.speaker（字符串或数字）
+ * - SeedASR: utterances[].speaker
+ * - 其他字段兼容：user / speaker_id
+ * 返回符合人类阅读习惯的格式：「发言人 1」（说话人小于 10）或「S<id>」。
+ */
+function extractSpeaker(u: Record<string, unknown>): string | undefined {
+	const additions = (u.additions as Record<string, unknown>) || {};
+	const raw =
+		u.speaker ?? additions.speaker ?? u.speaker_id ?? additions.speaker_id ?? u.user;
+	if (raw === undefined || raw === null || raw === "") return undefined;
+	const s = String(raw).trim();
+	if (!s) return undefined;
+	// 纯数字 → 人语言标签
+	if (/^\d+$/.test(s)) return `发言人 ${s}`;
+	return s;
 }
 
 /** 从 URL 推断音频格式（火山必填 format 字段） */

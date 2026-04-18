@@ -1,8 +1,16 @@
-import { App, Plugin, PluginSettingTab, Setting, Notice, Modal, TextComponent, TFile, normalizePath, getAllTags } from "obsidian";
+import { App, Plugin, PluginSettingTab, Setting, Notice, Modal, TextComponent, TFile, normalizePath, getAllTags, setIcon } from "obsidian";
 import { parsePodcastUrl } from "./parsers";
+import type { PodcastMetadata } from "./parsers/types";
 import { transcribeAudio } from "./ai/whisper";
 import { generateInsights, segmentsToPromptText } from "./ai/llm";
 import { renderNote, renderFilename } from "./generators/markdown";
+import { saveAudioToVault } from "./utils/audio";
+import { getEpisodeId } from "./utils/episode-id";
+import { getCachedTranscript, saveCachedTranscript, removeCachedTranscript } from "./utils/transcript-cache";
+import { PodcastPlayerView, PLAYER_VIEW_TYPE } from "./views/player-view";
+import type { EpisodeInfo } from "./views/player-view";
+import { registerTimestampProcessor, activatePlayerView } from "./views/timestamp-processor";
+import { registerBookmarkCommand } from "./views/bookmark-command";
 
 /**
  * 插件设置项
@@ -16,6 +24,8 @@ interface PodcastNoteSettings {
 	llmApiKey: string;
 	llmBaseUrl: string;
 	llmModel: string;
+	/** LLM 最大输出 token（默认 8000，长播客建议 16000） */
+	llmMaxTokens: number;
 
 	whisperProvider: "openai" | "siliconflow" | "volcengine" | "dashscope" | "custom";
 	whisperApiKey: string;
@@ -23,11 +33,23 @@ interface PodcastNoteSettings {
 	whisperModel: string;
 	/** 火山引擎专用：Resource ID（如 volc.seedasr.auc） */
 	whisperResourceId: string;
+	/** 说话人识别（仅 volcengine / dashscope 支持） */
+	whisperEnableDiarization: boolean;
+	/** 预期说话人数（仅 dashscope 有效，0 = 自动判断） */
+	whisperSpeakerCount: number;
 
 	// --- 笔记输出配置 ---
 	notesFolder: string;
 	filenameTemplate: string;
 	includeTranscript: boolean;
+
+	// --- 音频下载与时间戳跳转 ---
+	/** 下载音频到本地 Vault（开启后支持时间戳跳转与离线回听） */
+	downloadAudioLocal: boolean;
+	/** 在笔记顶部嵌入 Obsidian 原生播放器 */
+	embedAudioPlayer: boolean;
+	/** 首次启用下载开关时弹同步排除提醒的一次性标记 */
+	hasShownAudioSyncTip: boolean;
 }
 
 const DEFAULT_SETTINGS: PodcastNoteSettings = {
@@ -36,16 +58,23 @@ const DEFAULT_SETTINGS: PodcastNoteSettings = {
 	llmApiKey: "",
 	llmBaseUrl: "https://api.openai.com/v1",
 	llmModel: "gpt-4o-mini",
+	llmMaxTokens: 20000,
 
 	whisperProvider: "openai",
 	whisperApiKey: "",
 	whisperBaseUrl: "https://api.openai.com/v1",
 	whisperModel: "whisper-1",
 	whisperResourceId: "volc.seedasr.auc",
+	whisperEnableDiarization: true,
+	whisperSpeakerCount: 0,
 
 	notesFolder: "Podcasts",
 	filenameTemplate: "{{date}}-{{title}}",
 	includeTranscript: true,
+
+	downloadAudioLocal: false,
+	embedAudioPlayer: true,
+	hasShownAudioSyncTip: false,
 };
 
 export default class PodcastNotePlugin extends Plugin {
@@ -53,6 +82,15 @@ export default class PodcastNotePlugin extends Plugin {
 
 	async onload() {
 		await this.loadSettings();
+
+		// === 注册播客播放器侧边栏 View ===
+		this.registerView(PLAYER_VIEW_TYPE, (leaf) => new PodcastPlayerView(leaf));
+
+		// === 注册时间戳点击跳转 ===
+		registerTimestampProcessor(this);
+
+		// === 注册用户标记命令 ===
+		registerBookmarkCommand(this);
 
 		// 左侧 ribbon 按钮
 		this.addRibbonIcon("podcast", "从播客链接生成笔记", () => {
@@ -72,12 +110,95 @@ export default class PodcastNotePlugin extends Plugin {
 			},
 		});
 
+		// 打开/切换播放器面板
+		this.addCommand({
+			id: "toggle-player",
+			name: "打开播客播放器",
+			callback: () => {
+				activatePlayerView(this);
+			},
+		});
+
+		// 播放/暂停切换
+		this.addCommand({
+			id: "play-pause",
+			name: "播放 / 暂停",
+			callback: () => {
+				const view = this.getPlayerView();
+				if (view) view.togglePlay();
+			},
+		});
+
+		// 快进/快退
+		this.addCommand({
+			id: "skip-forward",
+			name: "快进 15 秒",
+			callback: () => {
+				const view = this.getPlayerView();
+				if (view) view.seekTo(view.getCurrentTime() + 15);
+			},
+		});
+
+		this.addCommand({
+			id: "skip-backward",
+			name: "后退 15 秒",
+			callback: () => {
+				const view = this.getPlayerView();
+				if (view) view.seekTo(Math.max(0, view.getCurrentTime() - 15));
+			},
+		});
+
+		// 重新生成当前笔记（复用缓存，只重跑 LLM）
+		this.addCommand({
+			id: "regenerate-note",
+			name: "重新生成当前播客笔记（复用转录缓存）",
+			callback: () => {
+				this.regenerateCurrentNote();
+			},
+		});
+
+		// 清除当前笔记的转录缓存
+		this.addCommand({
+			id: "clear-transcript-cache",
+			name: "清除当前笔记的转录缓存",
+			callback: async () => {
+				const activeFile = this.app.workspace.getActiveFile();
+				if (!activeFile) {
+					new Notice("请先打开一篇播客笔记");
+					return;
+				}
+				const fm = this.app.metadataCache.getFileCache(activeFile)?.frontmatter;
+				if (!fm?.source) {
+					new Notice("当前笔记没有播客元数据");
+					return;
+				}
+				const meta: PodcastMetadata = {
+					title: fm.title || activeFile.basename,
+					podcastName: fm.podcast || "",
+					publishDate: fm.date || "",
+					audioUrl: fm.audio_url || "",
+					sourceUrl: fm.source,
+					platform: this.detectPlatform(fm.source),
+				};
+				await removeCachedTranscript(this.app.vault, getEpisodeId(meta));
+				new Notice("✅ 转录缓存已清除，下次生成将重新调用 Whisper");
+			},
+		});
+
 		// 设置面板
 		this.addSettingTab(new PodcastNoteSettingTab(this.app, this));
 	}
 
 	onunload() {
-		// 清理逻辑（目前无需清理资源）
+		// 清理播放器 View
+		this.app.workspace.detachLeavesOfType(PLAYER_VIEW_TYPE);
+	}
+
+	/** 获取播放器 View 实例 */
+	getPlayerView(): PodcastPlayerView | null {
+		const leaves = this.app.workspace.getLeavesOfType(PLAYER_VIEW_TYPE);
+		if (leaves.length === 0) return null;
+		return leaves[0].view as PodcastPlayerView;
 	}
 
 	async loadSettings() {
@@ -91,9 +212,10 @@ export default class PodcastNotePlugin extends Plugin {
 	/**
 	 * 处理播客链接的主流程入口。
 	 * 1. 解析元数据
-	 * 2. 下载音频 + Whisper 转录
-	 * 3. LLM 生成结构化产出
-	 * 4. 渲染 Markdown 并写入 Vault
+	 * 2. （可选）下载音频到本地
+	 * 3. 转录（优先读缓存，省钱）
+	 * 4. LLM 生成结构化产出
+	 * 5. 渲染 Markdown 并写入 Vault
 	 */
 	private async handlePodcastUrl(url: string): Promise<void> {
 		if (!url) {
@@ -101,40 +223,87 @@ export default class PodcastNotePlugin extends Plugin {
 			return;
 		}
 
+		const progress = new ProgressNotice([
+			"解析播客页面",
+			"下载音频到本地",
+			"语音转录",
+			"AI 提炼",
+			"写入笔记",
+		]);
+
 		// ========= 1. 解析元数据 =========
-		const step1 = new Notice("📡 正在解析播客页面…", 0);
+		progress.advance("📡 正在解析播客页面…");
 		let meta;
 		try {
 			meta = await parsePodcastUrl(url);
 		} catch (err) {
-			step1.hide();
-			this.notifyError("解析失败", err);
+			progress.error("解析失败", err);
 			return;
 		}
-		step1.hide();
-		new Notice(`✅ 已识别：${meta.podcastName} · ${meta.title}`, 3000);
+		progress.detail(`已识别：${meta.podcastName} · ${meta.title}`);
 
-		// ========= 2. 转录 =========
-		const step2 = new Notice("🎙️ 正在下载音频并转录（可能需要数分钟）…", 0);
+		// ========= 2. 可选：下载音频到本地 =========
+		let localAudioPath: string | undefined;
+		if (this.settings.downloadAudioLocal) {
+			progress.advance("⬇️ 正在下载音频到本地…");
+			try {
+				const folder = normalizePath(`${this.settings.notesFolder || "Podcasts"}/attachments`);
+				const basename = getEpisodeId(meta);
+				const saved = await saveAudioToVault(this.app.vault, folder, basename, meta.audioUrl);
+				localAudioPath = saved.path;
+				progress.detail(saved.reused ? `♻️ 音频已存在，复用` : `✅ 音频已保存`);
+			} catch (err) {
+				// 下载失败不阻断主流程，降级为纯文本时间戳
+				const msg = err instanceof Error ? err.message : String(err);
+				progress.detail(`⚠️ 音频下载失败，回退到远程播放：${msg}`);
+				console.error("[Podcast Note] 音频下载失败:", err);
+			}
+		} else {
+			progress.skip(); // 跳过"下载音频到本地"这一步
+		}
+
+		// ========= 3. 转录（优先读缓存） =========
+		const episodeId = getEpisodeId(meta);
+		const cached = await getCachedTranscript(this.app.vault, episodeId);
 		let transcript;
-		try {
-			transcript = await transcribeAudio(meta.audioUrl, {
-				provider: this.mapWhisperProvider(this.settings.whisperProvider),
-				apiKey: this.settings.whisperApiKey,
-				baseUrl: this.settings.whisperBaseUrl,
-				model: this.settings.whisperModel,
-				resourceId: this.settings.whisperResourceId,
-			});
-		} catch (err) {
-			step2.hide();
-			this.notifyError("转录失败", err);
-			return;
-		}
-		step2.hide();
-		new Notice(`✅ 转录完成（${transcript.segments.length} 段）`, 3000);
 
-		// ========= 3. LLM 提炼 =========
-		const step3 = new Notice("🧠 正在生成摘要、知识点、大纲…", 0);
+		if (cached) {
+			progress.advance("♻️ 已有转录缓存，跳过 Whisper");
+			transcript = cached;
+			progress.detail(`缓存命中（${transcript.segments.length} 段）`);
+		} else {
+			progress.advance("🎙️ 正在下载音频并转录（可能需要数分钟）…");
+			try {
+				transcript = await transcribeAudio(meta.audioUrl, {
+					provider: this.mapWhisperProvider(this.settings.whisperProvider),
+					apiKey: this.settings.whisperApiKey,
+					baseUrl: this.settings.whisperBaseUrl,
+					model: this.settings.whisperModel,
+					resourceId: this.settings.whisperResourceId,
+					enableSpeakerDiarization: this.supportsDiarization(this.settings.whisperProvider)
+						? this.settings.whisperEnableDiarization
+						: false,
+					speakerCount:
+						this.settings.whisperProvider === "dashscope" &&
+						this.settings.whisperEnableDiarization
+							? this.settings.whisperSpeakerCount
+							: undefined,
+				});
+			} catch (err) {
+				progress.error("转录失败", err);
+				return;
+			}
+			// 保存到缓存
+			try {
+				await saveCachedTranscript(this.app.vault, episodeId, transcript);
+			} catch (e) {
+				console.warn("[Podcast Note] 缓存保存失败（不影响主流程）:", e);
+			}
+			progress.detail(`转录完成（${transcript.segments.length} 段）`);
+		}
+
+		// ========= 4. LLM 提炼 =========
+		progress.advance("🧠 正在生成摘要、知识点、大纲…");
 		let insights;
 		try {
 			insights = await generateInsights(
@@ -150,27 +319,147 @@ export default class PodcastNotePlugin extends Plugin {
 					apiKey: this.settings.llmApiKey,
 					baseUrl: this.settings.llmBaseUrl,
 					model: this.settings.llmModel,
+					maxTokens: this.settings.llmMaxTokens,
 				}
 			);
 		} catch (err) {
-			step3.hide();
-			this.notifyError("AI 提炼失败", err);
+			progress.error("AI 提炼失败", err);
 			return;
 		}
-		step3.hide();
 
-		// ========= 4. 写入笔记 =========
+		// ========= 5. 写入笔记 =========
+		progress.advance("📝 正在写入笔记…");
 		try {
 			const body = renderNote(meta, insights, transcript, {
 				filenameTemplate: this.settings.filenameTemplate,
 				includeTranscript: this.settings.includeTranscript,
+				localAudioPath,
+				embedAudioPlayer: this.settings.embedAudioPlayer,
+				notesFolder: this.settings.notesFolder || "Podcasts",
+				remoteAudioUrl: meta.audioUrl,
 			});
 			const file = await this.writeNote(meta, body);
-			new Notice(`🎉 笔记已生成：${file.path}`, 5000);
+			progress.finish(`🎉 笔记已生成：${file.path}`);
+
+			// 打开笔记
 			this.app.workspace.getLeaf(false).openFile(file);
+
+			// 自动打开侧边栏播放器并加载音频
+			const episodeInfo: EpisodeInfo = {
+				title: meta.title,
+				podcastName: meta.podcastName,
+				sourceUrl: meta.sourceUrl,
+				localAudioPath,
+				remoteAudioUrl: meta.audioUrl,
+				notePath: file.path,
+			};
+			const playerView = await activatePlayerView(this);
+			if (playerView) {
+				playerView.loadEpisode(episodeInfo);
+			}
 		} catch (err) {
-			this.notifyError("笔记写入失败", err);
+			progress.error("笔记写入失败", err);
 		}
+	}
+
+	/**
+	 * 「重新生成」：读取当前笔记的 frontmatter + 缓存转录，只重跑 LLM，覆盖笔记内容。
+	 * 适合 LLM 出错或想换模板/模型时使用。
+	 */
+	private async regenerateCurrentNote(): Promise<void> {
+		const activeFile = this.app.workspace.getActiveFile();
+		if (!activeFile || activeFile.extension !== "md") {
+			new Notice("请先打开一篇播客笔记");
+			return;
+		}
+
+		// 读取 frontmatter
+		const cache = this.app.metadataCache.getFileCache(activeFile);
+		const fm = cache?.frontmatter;
+		if (!fm || !fm.source) {
+			new Notice("当前笔记没有播客元数据（缺少 source 字段）");
+			return;
+		}
+
+		// 从 frontmatter 重建 PodcastMetadata
+		const meta: PodcastMetadata = {
+			title: fm.title || activeFile.basename,
+			podcastName: fm.podcast || "",
+			publishDate: fm.date || new Date().toISOString().slice(0, 10),
+			duration: fm.duration,
+			description: "",
+			audioUrl: fm.audio_url || "",
+			sourceUrl: fm.source,
+			platform: this.detectPlatform(fm.source),
+		};
+
+		const episodeId = getEpisodeId(meta);
+		const transcript = await getCachedTranscript(this.app.vault, episodeId);
+		if (!transcript) {
+			new Notice("未找到转录缓存。请先用「从播客链接生成笔记」完整生成一次。");
+			return;
+		}
+
+		const progress = new ProgressNotice([
+			"读取缓存",
+			"AI 提炼",
+			"覆盖笔记",
+		]);
+
+		progress.advance("♻️ 已加载转录缓存");
+		progress.detail(`${transcript.segments.length} 段，跳过 Whisper`);
+
+		// LLM 重跑
+		progress.advance("🧠 正在重新生成摘要、知识点、大纲…");
+		let insights;
+		try {
+			insights = await generateInsights(
+				{
+					podcastName: meta.podcastName,
+					episodeTitle: meta.title,
+					description: meta.description,
+					transcriptWithTimestamps: segmentsToPromptText(transcript.segments),
+					existingTags: this.collectExistingTags(),
+				},
+				{
+					protocol: this.settings.llmProtocol,
+					apiKey: this.settings.llmApiKey,
+					baseUrl: this.settings.llmBaseUrl,
+					model: this.settings.llmModel,
+					maxTokens: this.settings.llmMaxTokens,
+				}
+			);
+		} catch (err) {
+			progress.error("AI 提炼失败", err);
+			return;
+		}
+
+		// 覆写笔记
+		progress.advance("📝 正在覆盖笔记…");
+		try {
+			const localAudioPath = fm.audio || undefined;
+			const body = renderNote(meta, insights, transcript, {
+				filenameTemplate: this.settings.filenameTemplate,
+				includeTranscript: this.settings.includeTranscript,
+				localAudioPath,
+				embedAudioPlayer: this.settings.embedAudioPlayer,
+				notesFolder: this.settings.notesFolder || "Podcasts",
+				remoteAudioUrl: fm.audio_url || undefined,
+			});
+			await this.app.vault.modify(activeFile, body);
+			progress.finish(`🎉 笔记已重新生成：${activeFile.path}`);
+		} catch (err) {
+			progress.error("笔记写入失败", err);
+		}
+	}
+
+	/**
+	 * 从 URL 推断平台类型
+	 */
+	private detectPlatform(url: string): PodcastMetadata["platform"] {
+		if (/xiaoyuzhoufm\.com/.test(url)) return "xiaoyuzhou";
+		if (/spotify\.com/.test(url)) return "spotify";
+		return "unknown";
 	}
 
 	/**
@@ -206,12 +495,6 @@ export default class PodcastNotePlugin extends Plugin {
 		return this.app.vault.create(finalPath, body);
 	}
 
-	private notifyError(prefix: string, err: unknown): void {
-		const msg = err instanceof Error ? err.message : String(err);
-		new Notice(`${prefix}：${msg}`, 8000);
-		console.error(`[Podcast Note] ${prefix}:`, err);
-	}
-
 	/**
 	 * 把 UI 层的 provider 选项映射到 whisper dispatcher 支持的三种类型。
 	 * openai / siliconflow / custom 共用 OpenAI 兼容路径。
@@ -222,6 +505,106 @@ export default class PodcastNotePlugin extends Plugin {
 		if (uiProvider === "volcengine") return "volcengine";
 		if (uiProvider === "dashscope") return "dashscope";
 		return "openai";
+	}
+
+	/**
+	 * OpenAI Whisper / 硅基流动 / 自定义（OpenAI 兼容）都不返回 speaker。
+	 * 仅火山引擎和通义支持说话人识别。
+	 */
+	private supportsDiarization(
+		uiProvider: PodcastNoteSettings["whisperProvider"]
+	): boolean {
+		return uiProvider === "volcengine" || uiProvider === "dashscope";
+	}
+}
+
+/**
+ * 带进度条的持久通知，替代多个独立 Notice。
+ * 显示：步骤列表 + 当前步骤高亮 + 已完成打钩 + 进度条。
+ */
+class ProgressNotice {
+	private notice: Notice;
+	private steps: string[];
+	private currentStep = -1;
+	private startTime: number;
+
+	constructor(steps: string[]) {
+		this.steps = steps;
+		this.startTime = Date.now();
+		this.notice = new Notice("", 0);
+		this.notice.noticeEl.addClass("podcast-progress-notice");
+		this.render();
+	}
+
+	/** 推进到下一步 */
+	advance(message?: string) {
+		this.currentStep++;
+		this.render(message);
+	}
+
+	/** 跳过当前步骤（如"下载音频"被关闭时） */
+	skip() {
+		this.currentStep++;
+	}
+
+	/** 更新当前步骤的详细信息 */
+	detail(text: string) {
+		const el = this.notice.noticeEl;
+		const detailEl = el.querySelector(".progress-detail");
+		if (detailEl) detailEl.textContent = text;
+	}
+
+	/** 全部完成 */
+	finish(message: string) {
+		this.notice.hide();
+		new Notice(message, 5000);
+	}
+
+	/** 出错终止 */
+	error(prefix: string, err: unknown) {
+		this.notice.hide();
+		const msg = err instanceof Error ? err.message : String(err);
+		new Notice(`${prefix}：${msg}`, 8000);
+		console.error(`[Podcast Note] ${prefix}:`, err);
+	}
+
+	private render(message?: string) {
+		const el = this.notice.noticeEl;
+		el.empty();
+
+		// 标题
+		const titleEl = el.createEl("div", { cls: "progress-title" });
+		titleEl.textContent = "Podcast Note 生成中…";
+
+		// 进度条
+		const barOuter = el.createEl("div", { cls: "progress-bar-outer" });
+		const barInner = barOuter.createEl("div", { cls: "progress-bar-inner" });
+		const pct = Math.min(100, Math.round(((this.currentStep + 1) / this.steps.length) * 100));
+		barInner.style.width = `${pct}%`;
+
+		// 步骤列表
+		const listEl = el.createEl("div", { cls: "progress-steps" });
+		for (let i = 0; i < this.steps.length; i++) {
+			const stepEl = listEl.createEl("div", { cls: "progress-step" });
+			if (i < this.currentStep) {
+				stepEl.addClass("step-done");
+				stepEl.textContent = `✅ ${this.steps[i]}`;
+			} else if (i === this.currentStep) {
+				stepEl.addClass("step-active");
+				stepEl.textContent = `⏳ ${message || this.steps[i]}`;
+			} else {
+				stepEl.addClass("step-pending");
+				stepEl.textContent = `○ ${this.steps[i]}`;
+			}
+		}
+
+		// 详细信息区
+		el.createEl("div", { cls: "progress-detail" });
+
+		// 耗时
+		const elapsed = Math.round((Date.now() - this.startTime) / 1000);
+		const timeEl = el.createEl("div", { cls: "progress-time" });
+		timeEl.textContent = `已用时 ${elapsed}s`;
 	}
 }
 
@@ -382,6 +765,22 @@ class PodcastNoteSettingTab extends PluginSettingTab {
 					})
 			);
 
+		new Setting(containerEl)
+			.setName("最大输出 Token")
+			.setDesc("LLM 单次回复的最大 token 数。长播客（>60 分钟）建议设为 16000。")
+			.addText((text) =>
+				text
+					.setPlaceholder("8000")
+					.setValue(String(this.plugin.settings.llmMaxTokens))
+					.onChange(async (value) => {
+						const n = parseInt(value, 10);
+						if (Number.isFinite(n) && n > 0) {
+							this.plugin.settings.llmMaxTokens = n;
+							await this.plugin.saveSettings();
+						}
+					})
+			);
+
 		// ============ Whisper 配置 ============
 		containerEl.createEl("h3", { text: "语音转录" });
 
@@ -485,6 +884,57 @@ class PodcastNoteSettingTab extends PluginSettingTab {
 				);
 		}
 
+		// 说话人识别：仅火山 / 通义支持；OpenAI Whisper / 硅基流动 / 自定义不支持
+		if (
+			this.plugin.settings.whisperProvider === "volcengine" ||
+			this.plugin.settings.whisperProvider === "dashscope"
+		) {
+			new Setting(containerEl)
+				.setName("识别说话人")
+				.setDesc(
+					"逐字稿中标注「发言人 1 / 发言人 2」等，适合多人对话类播客。"
+				)
+				.addToggle((t) =>
+					t
+						.setValue(this.plugin.settings.whisperEnableDiarization)
+						.onChange(async (value) => {
+							this.plugin.settings.whisperEnableDiarization = value;
+							await this.plugin.saveSettings();
+							this.display();
+						})
+				);
+
+			// 仅 DashScope 支持 speaker_count；0 = 自动
+			if (
+				this.plugin.settings.whisperProvider === "dashscope" &&
+				this.plugin.settings.whisperEnableDiarization
+			) {
+				new Setting(containerEl)
+					.setName("预期说话人数")
+					.setDesc("0 或留空表示由模型自动判断；若已知人数（如 2 人对谈），填具体数字可提升准确率。")
+					.addText((text) =>
+						text
+							.setPlaceholder("0")
+							.setValue(String(this.plugin.settings.whisperSpeakerCount || 0))
+							.onChange(async (value) => {
+								const n = parseInt(value.trim(), 10);
+								this.plugin.settings.whisperSpeakerCount =
+									Number.isFinite(n) && n > 0 ? n : 0;
+								await this.plugin.saveSettings();
+							})
+					);
+			}
+		} else {
+			// 针对不支持的 provider 显示灰色提示
+			const tipEl = containerEl.createEl("div", {
+				cls: "setting-item-description",
+			});
+			tipEl.style.paddingLeft = "8px";
+			tipEl.style.marginTop = "-4px";
+			tipEl.style.opacity = "0.6";
+			tipEl.textContent = "ℹ️ 说话人识别仅火山引擎 / 通义 DashScope 支持，当前服务商不可用。";
+		}
+
 		// ============ 笔记输出 ============
 		containerEl.createEl("h3", { text: "笔记输出" });
 
@@ -520,6 +970,44 @@ class PodcastNoteSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(this.plugin.settings.includeTranscript).onChange(async (value) => {
 					this.plugin.settings.includeTranscript = value;
+					await this.plugin.saveSettings();
+				})
+			);
+
+		// ============ 音频下载 ============
+		containerEl.createEl("h3", { text: "音频下载（可选）" });
+
+		containerEl.createEl("p", {
+			text: "关闭时，侧边栏播放器通过远程 URL 在线播放，时间戳跳转同样可用。开启后，音频会下载到 {笔记保存路径}/attachments/ 目录，支持离线回听，并可在笔记顶部嵌入 Obsidian 原生播放器。建议在同步工具（Obsidian Sync / iCloud / Git .gitignore）中排除 attachments/ 以避免占用同步空间。",
+			cls: "setting-item-description",
+		});
+
+		new Setting(containerEl)
+			.setName("下载音频到本地")
+			.setDesc("关闭（默认）：侧边栏播放器在线播放，时间戳可用；开启：额外支持离线回听 + 原生嵌入播放器。单集常见 50-100MB。")
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.downloadAudioLocal).onChange(async (value) => {
+					this.plugin.settings.downloadAudioLocal = value;
+					await this.plugin.saveSettings();
+
+					// 首次开启时弹一次性提醒
+					if (value && !this.plugin.settings.hasShownAudioSyncTip) {
+						this.plugin.settings.hasShownAudioSyncTip = true;
+						await this.plugin.saveSettings();
+						new Notice(
+							`💡 建议在 Obsidian Sync / iCloud / Git 中排除 ${this.plugin.settings.notesFolder}/attachments/ 目录，避免占用同步空间。`,
+							10000
+						);
+					}
+				})
+			);
+
+		new Setting(containerEl)
+			.setName("在笔记顶部嵌入原生播放器")
+			.setDesc("仅当「下载音频到本地」开启时生效。嵌入 Obsidian 原生 ![[audio]] 播放器。侧边栏播放器始终可用，不受此开关影响。")
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.embedAudioPlayer).onChange(async (value) => {
+					this.plugin.settings.embedAudioPlayer = value;
 					await this.plugin.saveSettings();
 				})
 			);

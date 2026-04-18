@@ -1,5 +1,5 @@
 import { requestUrl } from "obsidian";
-import type { InsightContext, LlmConfig, OutlineNode, PodcastInsights } from "./llm-types";
+import type { InsightContext, LlmConfig, OutlineNode, PodcastInsights, TopicCluster, ActionItem, Resource } from "./llm-types";
 
 /**
  * 让 LLM 一次性返回全部结构化产出的 Prompt。
@@ -15,17 +15,27 @@ function buildSystemPrompt(): string {
 		"输出 JSON 结构：",
 		"{",
 		'  "summary": string, // 3-5 句话的摘要，聚焦"这期播客讲了什么、核心观点是什么"',
-		'  "knowledge_points": [ // 与主题相关或有价值的知识点（概念、名词、原理、思维模型、框架等）',
+		'  "topics": [ // 按讨论话题分组的核心观点（重点！把概念和案例关联在一起）',
 		"    {",
-		'      "title": string, // 简短的知识点名称',
-		'      "content": string, // 1-3 句话的清晰解释',
-		'      "start_seconds": number // 该知识点在逐字稿中首次出现的时间戳（秒，整数）',
+		'      "title": string, // 话题标题（如"第一性原理思维"）',
+		'      "insight": string, // 核心观点或概念的清晰解释（1-3 句话）',
+		'      "case_title": string | null, // 佐证案例的标题（没有案例时为 null）',
+		'      "case_content": string | null, // 佐证案例的描述（1-2 句话，没有时为 null）',
+		'      "start_seconds": number, // 该话题首次出现的时间戳（秒，整数）',
+		'      "case_start_seconds": number | null // 案例出现的时间戳（没有时为 null）',
 		"    }",
 		"  ],",
-		'  "cases": [ // 播客中有趣/有代表性的案例、故事',
+		'  "action_items": [ // 听完可以做的事（可选，不是每期都有，没有就给空数组）',
 		"    {",
-		'      "title": string,',
-		'      "content": string, // 1-2 句话概括案例',
+		'      "content": string, // 具体的行动建议',
+		'      "start_seconds": number',
+		"    }",
+		"  ],",
+		'  "resources": [ // 播客中提到的书、文章、工具、播客等资源（可选，没有就给空数组）',
+		"    {",
+		'      "name": string, // 资源名称',
+		'      "type": "book" | "article" | "tool" | "podcast" | "other",',
+		'      "description": string | null, // 一句话描述，可选',
 		'      "start_seconds": number',
 		"    }",
 		"  ],",
@@ -40,11 +50,15 @@ function buildSystemPrompt(): string {
 		"}",
 		"",
 		"重要要求：",
-		"1. 知识点应该聚焦在「可沉淀的有价值内容」上，不要罗列琐碎细节。",
-		"2. 每个 start_seconds 必须是从逐字稿时间戳中提取的真实数字，不要编造。",
-		"3. 如果用户提供了已有标签列表，优先从已有标签中选择合适的，没有合适的再新建。",
-		"4. 所有文本使用中文，保持简洁专业。",
-		"5. 严禁输出 ```json 或 ``` 等代码块包裹，直接输出 JSON 对象。",
+		"1. topics 是核心输出。按播客讨论的话题来组织，每个话题包含「核心观点」和「佐证案例」。",
+		"   概念和案例应该天然关联——不要把概念和案例割裂到不同数组里。",
+		"2. 如果一个话题有多个案例，只保留最有代表性的那一个。",
+		"3. 每个 start_seconds 必须是从逐字稿时间戳中提取的真实数字，不要编造。",
+		"4. action_items：只提取节目中明确建议的行动，不要自己编造建议。没有就给空数组。",
+		"5. resources：只提取节目中明确提到名字的资源，不要猜测或补充。没有就给空数组。",
+		"6. 如果用户提供了已有标签列表，优先从已有标签中选择合适的，没有合适的再新建。",
+		"7. 所有文本使用中文，保持简洁专业。",
+		"8. 严禁输出 ```json 或 ``` 等代码块包裹，直接输出 JSON 对象。",
 	].join("\n");
 }
 
@@ -79,21 +93,104 @@ function stripCodeFence(input: string): string {
 }
 
 /**
+ * 尝试修复被截断的 JSON（LLM 因 max_tokens 限制没写完）。
+ *
+ * 策略：从尾部向前找到最后一个完整的 value 边界，
+ * 然后补上缺失的 ] 和 }，让 JSON.parse 能通过。
+ */
+function repairTruncatedJson(raw: string): string {
+	let s = raw.trim();
+
+	// 1. 去掉尾部不完整的 string（引号没闭合）
+	//    找最后一个 " ，检查其前面的内容是否平衡
+	//    简单策略：去掉最后一个未闭合的 key-value 对
+	const lastQuote = s.lastIndexOf('"');
+	if (lastQuote > 0) {
+		// 检查引号是否成对：从 lastQuote 往前数连续 \ 的个数
+		let backslashes = 0;
+		for (let i = lastQuote - 1; i >= 0 && s[i] === '\\'; i--) backslashes++;
+		if (backslashes % 2 === 1) {
+			// 转义的引号，再往前找
+			s = s.slice(0, lastQuote);
+		}
+	}
+
+	// 2. 去掉尾部不完整的 token（没写完的 key 或 value）
+	//    从后往前找到最后一个结构性字符 , ] } " 之一
+	const structural = /[,\]\}"]/;
+	while (s.length > 0 && !structural.test(s[s.length - 1])) {
+		s = s.slice(0, -1);
+	}
+
+	// 3. 如果尾部是逗号或冒号，去掉（不完整的下一个 entry）
+	while (s.endsWith(',') || s.endsWith(':')) {
+		s = s.slice(0, -1).trimEnd();
+	}
+
+	// 4. 计算缺失的括号，从后往前补齐
+	const opens: string[] = [];
+	let inString = false;
+	let escape = false;
+	for (let i = 0; i < s.length; i++) {
+		const ch = s[i];
+		if (escape) { escape = false; continue; }
+		if (ch === '\\' && inString) { escape = true; continue; }
+		if (ch === '"') { inString = !inString; continue; }
+		if (inString) continue;
+		if (ch === '{' || ch === '[') opens.push(ch);
+		if (ch === '}' || ch === ']') opens.pop();
+	}
+
+	// 如果还在字符串里面，先补一个引号
+	if (inString) s += '"';
+
+	// 反向补齐括号
+	for (let i = opens.length - 1; i >= 0; i--) {
+		s += opens[i] === '{' ? '}' : ']';
+	}
+
+	return s;
+}
+
+/**
  * 把 LLM 返回的原始 JSON 映射为内部 PodcastInsights 结构。
  */
 function normalizeInsights(raw: unknown): PodcastInsights {
 	const r = (raw || {}) as Record<string, unknown>;
 	const arr = <T>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
 
-	const mapItem = (x: Record<string, unknown>) => ({
+	const mapTopic = (x: Record<string, unknown>): TopicCluster => ({
 		title: String(x.title || "").trim(),
+		insight: String(x.insight || "").trim(),
+		caseTitle: x.case_title ? String(x.case_title).trim() : (x.caseTitle ? String(x.caseTitle).trim() : undefined),
+		caseContent: x.case_content ? String(x.case_content).trim() : (x.caseContent ? String(x.caseContent).trim() : undefined),
+		startSeconds:
+			typeof x.start_seconds === "number" ? x.start_seconds
+			: typeof x.startSeconds === "number" ? (x.startSeconds as number)
+			: undefined,
+		caseStartSeconds:
+			typeof x.case_start_seconds === "number" ? x.case_start_seconds
+			: typeof x.caseStartSeconds === "number" ? (x.caseStartSeconds as number)
+			: undefined,
+	});
+
+	const mapAction = (x: Record<string, unknown>): ActionItem => ({
 		content: String(x.content || "").trim(),
 		startSeconds:
-			typeof x.start_seconds === "number"
-				? x.start_seconds
-				: typeof x.startSeconds === "number"
-				? (x.startSeconds as number)
-				: undefined,
+			typeof x.start_seconds === "number" ? x.start_seconds
+			: typeof x.startSeconds === "number" ? (x.startSeconds as number)
+			: undefined,
+	});
+
+	const mapResource = (x: Record<string, unknown>): Resource => ({
+		name: String(x.name || "").trim(),
+		type: (["book", "article", "tool", "podcast", "other"].includes(String(x.type))
+			? String(x.type) : "other") as Resource["type"],
+		description: x.description ? String(x.description).trim() : undefined,
+		startSeconds:
+			typeof x.start_seconds === "number" ? x.start_seconds
+			: typeof x.startSeconds === "number" ? (x.startSeconds as number)
+			: undefined,
 	});
 
 	const mapOutline = (x: Record<string, unknown>): OutlineNode => ({
@@ -109,12 +206,15 @@ function normalizeInsights(raw: unknown): PodcastInsights {
 
 	return {
 		summary: String(r.summary || "").trim(),
-		knowledgePoints: arr<Record<string, unknown>>(r.knowledge_points || r.knowledgePoints)
-			.map(mapItem)
-			.filter((it) => it.title && it.content),
-		cases: arr<Record<string, unknown>>(r.cases)
-			.map(mapItem)
-			.filter((it) => it.title && it.content),
+		topics: arr<Record<string, unknown>>(r.topics)
+			.map(mapTopic)
+			.filter((it) => it.title && it.insight),
+		actionItems: arr<Record<string, unknown>>(r.action_items || r.actionItems)
+			.map(mapAction)
+			.filter((it) => it.content),
+		resources: arr<Record<string, unknown>>(r.resources)
+			.map(mapResource)
+			.filter((it) => it.name),
 		outline: arr<Record<string, unknown>>(r.outline).map(mapOutline),
 		tags: arr<string>(r.tags).map((t) => String(t).replace(/^#/, "").trim()).filter(Boolean),
 	};
@@ -157,12 +257,20 @@ export async function generateInsights(
 			: await callOpenAI(ctx, config);
 
 	let parsed: unknown;
+	const cleaned = stripCodeFence(rawContent);
 	try {
-		parsed = JSON.parse(stripCodeFence(rawContent));
-	} catch (e) {
-		throw new Error(
-			`LLM 返回的不是合法 JSON，前 200 字符：${rawContent.slice(0, 200)}…`
-		);
+		parsed = JSON.parse(cleaned);
+	} catch (_firstErr) {
+		// 尝试修复被截断的 JSON（常见于 max_tokens 不够的场景）
+		try {
+			const repaired = repairTruncatedJson(cleaned);
+			parsed = JSON.parse(repaired);
+			console.warn("[Podcast] LLM JSON 被截断，已自动修复");
+		} catch (_repairErr) {
+			throw new Error(
+				`LLM 返回的不是合法 JSON（可能输出被截断，请在设置中增大 max_tokens 或缩短播客时长）。前 200 字符：${rawContent.slice(0, 200)}…`
+			);
+		}
 	}
 
 	return normalizeInsights(parsed);
@@ -174,9 +282,10 @@ export async function generateInsights(
 async function callOpenAI(ctx: InsightContext, config: LlmConfig): Promise<string> {
 	const endpoint = resolveChatEndpoint(config.baseUrl);
 
-	const body = {
+	const body: Record<string, unknown> = {
 		model: config.model,
 		temperature: 0.3,
+		max_tokens: config.maxTokens || 8000,
 		response_format: { type: "json_object" },
 		messages: [
 			{ role: "system", content: buildSystemPrompt() },
@@ -225,7 +334,7 @@ async function callAnthropic(ctx: InsightContext, config: LlmConfig): Promise<st
 
 	const body = {
 		model: config.model,
-		max_tokens: 8000,
+		max_tokens: config.maxTokens || 8000,
 		temperature: 0.3,
 		system: buildSystemPrompt() + "\n\n请记住：只输出一个 JSON 对象，不要任何前后缀说明。",
 		messages: [

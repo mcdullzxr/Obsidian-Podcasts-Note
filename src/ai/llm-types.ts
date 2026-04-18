@@ -4,22 +4,52 @@
 export interface PodcastInsights {
 	/** 摘要：3-5 句话概括 */
 	summary: string;
-	/** 知识点（概念、名词、原理、框架等） */
-	knowledgePoints: InsightItem[];
-	/** 有趣的案例、故事 */
-	cases: InsightItem[];
+	/** 话题聚类：按讨论话题分组，每组包含核心观点 + 案例佐证 */
+	topics: TopicCluster[];
+	/** 行动建议：听完能做什么（可选，不是每期都有） */
+	actionItems: ActionItem[];
+	/** 延伸阅读/资源：播客中提到的书、文章、工具等 */
+	resources: Resource[];
 	/** 结构化大纲 */
 	outline: OutlineNode[];
 	/** 推荐的标签 */
 	tags: string[];
 }
 
-export interface InsightItem {
-	/** 小标题（如概念名） */
+/**
+ * 话题聚类：一个讨论话题 = 核心观点 + 案例佐证。
+ * 把播客按「聊了什么话题」来组织，概念和案例天然关联。
+ */
+export interface TopicCluster {
+	/** 话题标题（如"第一性原理思维"） */
 	title: string;
-	/** 内容描述 */
+	/** 核心观点/概念的清晰解释 */
+	insight: string;
+	/** 佐证案例的标题（可选） */
+	caseTitle?: string;
+	/** 佐证案例内容（可选，不是每个话题都有案例） */
+	caseContent?: string;
+	/** 该话题在逐字稿中首次出现的时间戳（秒） */
+	startSeconds?: number;
+	/** 案例对应的时间戳（秒，可选） */
+	caseStartSeconds?: number;
+}
+
+export interface ActionItem {
+	/** 行动建议内容 */
 	content: string;
-	/** 开始时间戳（秒），用于在笔记里标注 ⏱️ */
+	/** 时间戳（秒） */
+	startSeconds?: number;
+}
+
+export interface Resource {
+	/** 资源名称（如书名、工具名） */
+	name: string;
+	/** 类型 */
+	type: "book" | "article" | "tool" | "podcast" | "other";
+	/** 简短描述 */
+	description?: string;
+	/** 时间戳（秒） */
 	startSeconds?: number;
 }
 
@@ -45,6 +75,8 @@ export interface LlmConfig {
 	apiKey: string;
 	baseUrl: string;
 	model: string;
+	/** 最大输出 token 数（默认 8000） */
+	maxTokens?: number;
 }
 
 /**

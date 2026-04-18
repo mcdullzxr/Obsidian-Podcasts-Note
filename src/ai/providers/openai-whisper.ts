@@ -5,6 +5,7 @@ import {
 	type TranscriptionResult,
 	type WhisperConfig,
 } from "../types";
+import { downloadAudio, guessExtension } from "../../utils/audio";
 
 /**
  * OpenAI Whisper 兼容接口（含硅基流动、Groq 等）。
@@ -33,7 +34,7 @@ export async function transcribeOpenAI(
 		);
 	}
 
-	const ext = inferExtension(contentType, audioUrl);
+	const ext = guessExtension(contentType, audioUrl);
 	const filename = `audio.${ext}`;
 
 	const boundary = `----PodcastNote${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`;
@@ -83,50 +84,6 @@ export async function transcribeOpenAI(
 		language: data.language,
 		duration: data.duration,
 	};
-}
-
-/**
- * 下载音频文件为 ArrayBuffer。
- */
-async function downloadAudio(audioUrl: string): Promise<{
-	buffer: ArrayBuffer;
-	contentType: string;
-}> {
-	const res = await requestUrl({
-		url: audioUrl,
-		method: "GET",
-		headers: {
-			"User-Agent":
-				"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-		},
-	});
-	if (res.status !== 200) {
-		throw new Error(`音频下载失败，状态码：${res.status}`);
-	}
-	const contentType =
-		res.headers["content-type"] || res.headers["Content-Type"] || "audio/mpeg";
-	return { buffer: res.arrayBuffer, contentType };
-}
-
-/**
- * 从 Content-Type 或 URL 推断文件扩展名。
- */
-function inferExtension(contentType: string, url: string): string {
-	const map: Record<string, string> = {
-		"audio/mpeg": "mp3",
-		"audio/mp3": "mp3",
-		"audio/mp4": "m4a",
-		"audio/x-m4a": "m4a",
-		"audio/wav": "wav",
-		"audio/x-wav": "wav",
-		"audio/webm": "webm",
-		"audio/ogg": "ogg",
-		"audio/flac": "flac",
-	};
-	const lowerCt = contentType.split(";")[0].trim().toLowerCase();
-	if (map[lowerCt]) return map[lowerCt];
-	const urlExt = url.split("?")[0].match(/\.(mp3|m4a|wav|webm|ogg|flac)$/i)?.[1];
-	return (urlExt || "mp3").toLowerCase();
 }
 
 /**

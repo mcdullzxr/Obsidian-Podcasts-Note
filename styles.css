@@ -6,3 +6,241 @@
 	justify-content: flex-end;
 	gap: 8px;
 }
+
+/* ============================================
+   播客播放器侧边栏
+   ============================================ */
+
+.podcast-player-container {
+	display: flex;
+	flex-direction: column;
+	padding: 12px;
+	gap: 12px;
+	height: 100%;
+}
+
+.podcast-player-header {
+	flex-shrink: 0;
+}
+
+.podcast-player-title {
+	font-weight: 600;
+	font-size: 14px;
+	line-height: 1.4;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+}
+
+.podcast-player-subtitle {
+	font-size: 12px;
+	opacity: 0.7;
+	margin-top: 2px;
+}
+
+/* 进度条 */
+.podcast-player-progress {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-shrink: 0;
+}
+
+.podcast-player-time {
+	font-size: 11px;
+	font-family: var(--font-monospace);
+	opacity: 0.8;
+	min-width: 42px;
+	text-align: center;
+}
+
+.podcast-player-slider {
+	flex: 1;
+	height: 4px;
+	-webkit-appearance: none;
+	appearance: none;
+	background: var(--background-modifier-border);
+	border-radius: 2px;
+	outline: none;
+	cursor: pointer;
+}
+
+.podcast-player-slider::-webkit-slider-thumb {
+	-webkit-appearance: none;
+	appearance: none;
+	width: 12px;
+	height: 12px;
+	border-radius: 50%;
+	background: var(--interactive-accent);
+	cursor: pointer;
+}
+
+.podcast-player-slider::-moz-range-thumb {
+	width: 12px;
+	height: 12px;
+	border-radius: 50%;
+	background: var(--interactive-accent);
+	cursor: pointer;
+	border: none;
+}
+
+/* 控制按钮 */
+.podcast-player-controls {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	flex-shrink: 0;
+}
+
+.podcast-player-btn {
+	background: none;
+	border: none;
+	cursor: pointer;
+	color: var(--text-normal);
+	padding: 6px;
+	border-radius: var(--radius-s);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.podcast-player-btn:hover {
+	background: var(--background-modifier-hover);
+}
+
+.podcast-player-btn-play {
+	width: 40px;
+	height: 40px;
+	border-radius: 50%;
+	background: var(--interactive-accent) !important;
+	color: var(--text-on-accent) !important;
+}
+
+.podcast-player-btn-play:hover {
+	opacity: 0.9;
+}
+
+.podcast-player-speed {
+	font-size: 12px;
+	font-weight: 600;
+	min-width: 36px;
+}
+
+/* 底部信息 */
+.podcast-player-footer {
+	flex-shrink: 0;
+}
+
+.podcast-player-source {
+	font-size: 11px;
+	opacity: 0.6;
+}
+
+/* ============================================
+   时间戳链接样式
+   ============================================ */
+
+.podcast-timestamp-link {
+	font-family: var(--font-monospace);
+	font-size: 0.9em;
+	background: var(--background-modifier-hover);
+	padding: 1px 4px;
+	border-radius: var(--radius-s);
+	cursor: pointer;
+	text-decoration: none !important;
+	transition: background 0.15s ease;
+}
+
+.podcast-timestamp-link:hover {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+/* ============================================
+   知识点/案例 双栏卡片网格
+   ============================================ */
+
+.podcast-card-grid {
+	/* 宽屏（>600px）双列，窄屏自动回落单列 */
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+	gap: 8px;
+}
+
+/* 让 callout 在网格里填满高度 */
+.podcast-card-grid > .callout {
+	margin: 0 !important;
+}
+
+/* ============================================
+   折叠逐字稿内时间戳加粗样式微调
+   ============================================ */
+
+.callout[data-callout="note"] .podcast-timestamp-link {
+	font-weight: 600;
+}
+
+/* ============================================
+   进度条通知
+   ============================================ */
+
+.podcast-progress-notice {
+	width: 320px;
+	max-width: 90vw;
+}
+
+.podcast-progress-notice .progress-title {
+	font-weight: 600;
+	margin-bottom: 8px;
+	font-size: 14px;
+}
+
+.podcast-progress-notice .progress-bar-outer {
+	height: 6px;
+	background: var(--background-modifier-border);
+	border-radius: 3px;
+	overflow: hidden;
+	margin-bottom: 8px;
+}
+
+.podcast-progress-notice .progress-bar-inner {
+	height: 100%;
+	background: var(--interactive-accent);
+	border-radius: 3px;
+	transition: width 0.3s ease;
+}
+
+.podcast-progress-notice .progress-steps {
+	font-size: 12px;
+	line-height: 1.8;
+}
+
+.podcast-progress-notice .step-done {
+	color: var(--text-muted);
+}
+
+.podcast-progress-notice .step-active {
+	color: var(--text-normal);
+	font-weight: 500;
+}
+
+.podcast-progress-notice .step-pending {
+	color: var(--text-faint);
+}
+
+.podcast-progress-notice .progress-detail {
+	font-size: 11px;
+	color: var(--text-muted);
+	margin-top: 4px;
+	min-height: 16px;
+}
+
+.podcast-progress-notice .progress-time {
+	font-size: 11px;
+	color: var(--text-faint);
+	text-align: right;
+	margin-top: 4px;
+}

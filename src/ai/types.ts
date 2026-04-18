@@ -48,6 +48,10 @@ export interface WhisperConfig {
 	baseUrl?: string;
 	/** 火山资源 ID，如 volc.seedasr.auc / volc.bigasr.auc */
 	resourceId?: string;
+	/** 是否启用说话人识别（仅 volcengine / dashscope 支持） */
+	enableSpeakerDiarization?: boolean;
+	/** 预期说话人数（仅 dashscope 有效，0 或 undefined 表示自动判断） */
+	speakerCount?: number;
 }
 
 /** OpenAI Whisper 单次上传上限 */
