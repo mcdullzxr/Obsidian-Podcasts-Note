@@ -38,20 +38,44 @@ export function registerBookmarkCommand(plugin: Plugin): void {
 			}
 
 			if (headingLine !== -1) {
-				// 在标题后紧邻的位置插入：跳过已有标记项（- 开头），遇到其他内容就停
-				let insertLine = headingLine + 1;
-				while (insertLine < lineCount && editor.getLine(insertLine).startsWith("- ")) {
-					insertLine++;
+				const cursor = editor.getCursor();
+
+				// 判断光标是否已在书签区域内（标题行之后、下一个非书签内容之前）
+				let sectionEnd = headingLine + 1;
+				while (sectionEnd < lineCount) {
+					const line = editor.getLine(sectionEnd);
+					if (line.startsWith("- ")) { sectionEnd++; continue; }
+					if (line.trim() === "") { sectionEnd++; continue; } // 空行也算区域内
+					break;
 				}
 
-				// 在 insertLine 处插入新行（原有内容往下推）
-				editor.replaceRange(
-					insertText + "\n",
-					{ line: insertLine, ch: 0 }
-				);
+				const cursorInSection = cursor.line > headingLine && cursor.line < sectionEnd;
 
-				// 光标移到新插入行的末尾（方便用户紧接着输入备注）
-				editor.setCursor({ line: insertLine, ch: insertText.length });
+				if (cursorInSection) {
+					// 光标在书签区域内——就地插入
+					const currentLine = editor.getLine(cursor.line);
+					if (currentLine.trim() === "" || currentLine.trim() === "-") {
+						// 当前行是空行或空列表续写 → 直接替换这一行
+						editor.setLine(cursor.line, insertText);
+						editor.setCursor({ line: cursor.line, ch: insertText.length });
+					} else {
+						// 当前行有内容 → 在行末追加新行
+						const lineEnd = currentLine.length;
+						editor.replaceRange("\n" + insertText, { line: cursor.line, ch: lineEnd });
+						editor.setCursor({ line: cursor.line + 1, ch: insertText.length });
+					}
+				} else {
+					// 光标不在书签区域 → 追加到最后一个书签行末尾
+					let insertAfterLine = headingLine;
+					let nextLine = headingLine + 1;
+					while (nextLine < lineCount && editor.getLine(nextLine).startsWith("- ")) {
+						insertAfterLine = nextLine;
+						nextLine++;
+					}
+					const lineEnd = editor.getLine(insertAfterLine).length;
+					editor.replaceRange("\n" + insertText, { line: insertAfterLine, ch: lineEnd });
+					editor.setCursor({ line: insertAfterLine + 1, ch: insertText.length });
+				}
 			} else {
 				// 没有标记区域，在光标位置插入
 				const cursor = editor.getCursor();

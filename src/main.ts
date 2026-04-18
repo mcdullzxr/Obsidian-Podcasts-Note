@@ -187,6 +187,94 @@ export default class PodcastNotePlugin extends Plugin {
 
 		// 设置面板
 		this.addSettingTab(new PodcastNoteSettingTab(this.app, this));
+
+		// === 切换笔记时自动加载音频到播放器 ===
+		this.registerEvent(
+			this.app.workspace.on("active-leaf-change", () => {
+				// 延迟等待 metadataCache 就绪
+				setTimeout(() => this.autoLoadAudioForActiveNote(), 300);
+			})
+		);
+	}
+
+	/**
+	 * 当切换到播客笔记时，自动将音频加载到播放器。
+	 * 判断依据：frontmatter 中有 audio 或 audio_url 字段。
+	 */
+	private autoLoadAudioForActiveNote(): void {
+		const file = this.app.workspace.getActiveFile();
+		if (!file) return;
+
+		const cache = this.app.metadataCache.getFileCache(file);
+		const fm = cache?.frontmatter;
+		if (!fm) return;
+
+		const localAudioPath = fm.audio as string | undefined;
+		const remoteAudioUrl = fm.audio_url as string | undefined;
+		if (!localAudioPath && !remoteAudioUrl) return;
+
+		// 检查播放器是否已加载同一笔记
+		const playerView = this.getPlayerView();
+		if (playerView) {
+			const currentEpisode = playerView.getEpisode();
+			if (currentEpisode?.notePath === file.path) return; // 已加载，无需重复
+		}
+
+		// 有播放器就加载，没有就不主动创建（避免每次打开笔记都弹出播放器）
+		if (playerView) {
+			playerView.loadEpisode({
+				title: (fm.title as string) || file.basename,
+				podcastName: (fm.podcast as string) || "",
+				sourceUrl: (fm.source as string) || "",
+				localAudioPath,
+				remoteAudioUrl,
+				notePath: file.path,
+			});
+		}
+
+		// === 切换笔记时自动加载音频到播放器 ===
+		this.registerEvent(
+			this.app.workspace.on("active-leaf-change", () => {
+				// 延迟等待 metadataCache 就绪
+				setTimeout(() => this.autoLoadAudioForActiveNote(), 300);
+			})
+		);
+	}
+
+	/**
+	 * 当切换到播客笔记时，自动将音频加载到播放器。
+	 * 判断依据：frontmatter 中有 audio 或 audio_url 字段。
+	 */
+	private autoLoadAudioForActiveNote(): void {
+		const file = this.app.workspace.getActiveFile();
+		if (!file) return;
+
+		const cache = this.app.metadataCache.getFileCache(file);
+		const fm = cache?.frontmatter;
+		if (!fm) return;
+
+		const localAudioPath = fm.audio as string | undefined;
+		const remoteAudioUrl = fm.audio_url as string | undefined;
+		if (!localAudioPath && !remoteAudioUrl) return;
+
+		// 检查播放器是否已加载同一笔记
+		const playerView = this.getPlayerView();
+		if (playerView) {
+			const currentEpisode = playerView.getEpisode();
+			if (currentEpisode?.notePath === file.path) return; // 已加载，无需重复
+		}
+
+		// 有播放器就加载，没有就不主动创建（避免每次打开笔记都弹出播放器）
+		if (playerView) {
+			playerView.loadEpisode({
+				title: (fm.title as string) || file.basename,
+				podcastName: (fm.podcast as string) || "",
+				sourceUrl: (fm.source as string) || "",
+				localAudioPath,
+				remoteAudioUrl,
+				notePath: file.path,
+			});
+		}
 	}
 
 	onunload() {
