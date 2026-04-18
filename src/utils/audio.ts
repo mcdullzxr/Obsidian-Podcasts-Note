@@ -1,6 +1,17 @@
 import { requestUrl, normalizePath, type Vault } from "obsidian";
 
 /**
+ * 递归确保多级文件夹存在。
+ */
+async function ensureFolderExists(vault: Vault, folderPath: string): Promise<void> {
+	const folder = normalizePath(folderPath);
+	if (await vault.adapter.exists(folder)) return;
+	const parent = folder.includes("/") ? folder.slice(0, folder.lastIndexOf("/")) : "";
+	if (parent) await ensureFolderExists(vault, parent);
+	await vault.createFolder(folder);
+}
+
+/**
  * 音频下载结果。
  */
 export interface DownloadedAudio {
@@ -71,9 +82,7 @@ export async function saveAudioToVault(
 	audioUrl: string
 ): Promise<{ path: string; reused: boolean; buffer?: ArrayBuffer; contentType?: string }> {
 	const normalizedFolder = normalizePath(folder);
-	if (!(await vault.adapter.exists(normalizedFolder))) {
-		await vault.createFolder(normalizedFolder);
-	}
+	await ensureFolderExists(vault, normalizedFolder);
 
 	// 先看是否已经存在（尝试常见扩展名优先匹配 mp3/m4a）
 	for (const ext of ["mp3", "m4a", "aac", "wav", "webm", "ogg", "flac"]) {

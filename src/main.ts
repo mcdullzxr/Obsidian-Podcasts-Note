@@ -477,13 +477,24 @@ export default class PodcastNotePlugin extends Plugin {
 	}
 
 	/**
+	 * 递归确保路径上的所有文件夹都存在。
+	 * 支持 `A/B/C` 多级路径。
+	 */
+	private async ensureFolder(folderPath: string): Promise<void> {
+		const folder = normalizePath(folderPath);
+		if (await this.app.vault.adapter.exists(folder)) return;
+		// 先确保父目录存在
+		const parent = folder.includes("/") ? folder.slice(0, folder.lastIndexOf("/")) : "";
+		if (parent) await this.ensureFolder(parent);
+		await this.app.vault.createFolder(folder);
+	}
+
+	/**
 	 * 把笔记内容写入 Vault，自动确保文件夹存在并处理重名。
 	 */
 	private async writeNote(meta: Awaited<ReturnType<typeof parsePodcastUrl>>, body: string): Promise<TFile> {
 		const folder = normalizePath(this.settings.notesFolder || "Podcasts");
-		if (!(await this.app.vault.adapter.exists(folder))) {
-			await this.app.vault.createFolder(folder);
-		}
+		await this.ensureFolder(folder);
 
 		const baseName = renderFilename(meta, this.settings.filenameTemplate);
 		let finalPath = normalizePath(`${folder}/${baseName}.md`);
@@ -940,7 +951,7 @@ class PodcastNoteSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("笔记保存路径")
-			.setDesc("相对 Vault 根目录的文件夹路径。")
+			.setDesc("相对 Vault 根目录的文件夹路径，支持多级（如 知识管理/播客笔记）。")
 			.addText((text) =>
 				text
 					.setPlaceholder("Podcasts")

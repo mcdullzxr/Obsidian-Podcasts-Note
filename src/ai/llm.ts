@@ -159,27 +159,33 @@ function normalizeInsights(raw: unknown): PodcastInsights {
 	const r = (raw || {}) as Record<string, unknown>;
 	const arr = <T>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
 
+	/**
+	 * 从 LLM 返回的字段中宽容地解析秒数。
+	 * LLM 可能返回 number (754) 或 string ("754")，都要接受。
+	 */
+	const parseSec = (...candidates: unknown[]): number | undefined => {
+		for (const v of candidates) {
+			if (typeof v === "number" && Number.isFinite(v)) return v;
+			if (typeof v === "string") {
+				const n = Number(v);
+				if (Number.isFinite(n)) return n;
+			}
+		}
+		return undefined;
+	};
+
 	const mapTopic = (x: Record<string, unknown>): TopicCluster => ({
 		title: String(x.title || "").trim(),
 		insight: String(x.insight || "").trim(),
 		caseTitle: x.case_title ? String(x.case_title).trim() : (x.caseTitle ? String(x.caseTitle).trim() : undefined),
 		caseContent: x.case_content ? String(x.case_content).trim() : (x.caseContent ? String(x.caseContent).trim() : undefined),
-		startSeconds:
-			typeof x.start_seconds === "number" ? x.start_seconds
-			: typeof x.startSeconds === "number" ? (x.startSeconds as number)
-			: undefined,
-		caseStartSeconds:
-			typeof x.case_start_seconds === "number" ? x.case_start_seconds
-			: typeof x.caseStartSeconds === "number" ? (x.caseStartSeconds as number)
-			: undefined,
+		startSeconds: parseSec(x.start_seconds, x.startSeconds),
+		caseStartSeconds: parseSec(x.case_start_seconds, x.caseStartSeconds),
 	});
 
 	const mapAction = (x: Record<string, unknown>): ActionItem => ({
 		content: String(x.content || "").trim(),
-		startSeconds:
-			typeof x.start_seconds === "number" ? x.start_seconds
-			: typeof x.startSeconds === "number" ? (x.startSeconds as number)
-			: undefined,
+		startSeconds: parseSec(x.start_seconds, x.startSeconds),
 	});
 
 	const mapResource = (x: Record<string, unknown>): Resource => ({
@@ -187,20 +193,12 @@ function normalizeInsights(raw: unknown): PodcastInsights {
 		type: (["book", "article", "tool", "podcast", "other"].includes(String(x.type))
 			? String(x.type) : "other") as Resource["type"],
 		description: x.description ? String(x.description).trim() : undefined,
-		startSeconds:
-			typeof x.start_seconds === "number" ? x.start_seconds
-			: typeof x.startSeconds === "number" ? (x.startSeconds as number)
-			: undefined,
+		startSeconds: parseSec(x.start_seconds, x.startSeconds),
 	});
 
 	const mapOutline = (x: Record<string, unknown>): OutlineNode => ({
 		title: String(x.title || "").trim(),
-		startSeconds:
-			typeof x.start_seconds === "number"
-				? x.start_seconds
-				: typeof x.startSeconds === "number"
-				? (x.startSeconds as number)
-				: undefined,
+		startSeconds: parseSec(x.start_seconds, x.startSeconds),
 		children: arr<Record<string, unknown>>(x.children).map(mapOutline),
 	});
 
