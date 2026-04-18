@@ -38,33 +38,20 @@ export function registerBookmarkCommand(plugin: Plugin): void {
 			}
 
 			if (headingLine !== -1) {
-				// 找标题后面第一个可插入的位置：跳过空行，在下一个 ## 标题之前或文末
+				// 在标题后紧邻的位置插入：跳过已有标记项（- 开头），遇到其他内容就停
 				let insertLine = headingLine + 1;
-				// 跳过标题后紧跟的空行
-				while (insertLine < lineCount && editor.getLine(insertLine).trim() === "") {
-					insertLine++;
-				}
-				// 继续找到现有标记的末尾（以 - 开头的行）
-				while (insertLine < lineCount) {
-					const line = editor.getLine(insertLine);
-					if (line.startsWith("## ")) break; // 到达下一个标题
-					if (line.trim() === "" && insertLine + 1 < lineCount && editor.getLine(insertLine + 1).startsWith("## ")) break;
+				while (insertLine < lineCount && editor.getLine(insertLine).startsWith("- ")) {
 					insertLine++;
 				}
 
-				// 在 insertLine 之前插入新行
-				const before = insertLine > 0 ? editor.getLine(insertLine - 1) : "";
-				const needBlankBefore = before.trim() !== "" && !before.startsWith("- ");
-
-				const textToInsert = (needBlankBefore ? "\n" : "") + insertText + "\n";
+				// 在 insertLine 处插入新行（原有内容往下推）
 				editor.replaceRange(
-					textToInsert,
+					insertText + "\n",
 					{ line: insertLine, ch: 0 }
 				);
 
-				// 光标移到新插入行的末尾
-				const cursorLine = insertLine + (needBlankBefore ? 1 : 0);
-				editor.setCursor({ line: cursorLine, ch: insertText.length });
+				// 光标移到新插入行的末尾（方便用户紧接着输入备注）
+				editor.setCursor({ line: insertLine, ch: insertText.length });
 			} else {
 				// 没有标记区域，在光标位置插入
 				const cursor = editor.getCursor();
