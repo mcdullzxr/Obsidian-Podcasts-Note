@@ -4,8 +4,18 @@
 export interface PodcastInsights {
 	/** 摘要：3-5 句话概括 */
 	summary: string;
-	/** 话题聚类：按讨论话题分组，每组包含核心观点 + 案例佐证 */
+	/** 核心论点：用一句话概括整期播客最想传达的观点 */
+	coreThesis: string;
+	/** 话题逻辑链：描述各话题之间的递进/因果关系（如"从 A → B → C"） */
+	topicFlow: string;
+	/** 话题聚类：按逻辑递进顺序排列，每组包含核心观点 + 案例佐证 */
 	topics: TopicCluster[];
+	/** 金句：播客中最精彩的 2-3 句原话 */
+	quotes: Quote[];
+	/** 反思问题：帮助听众深度思考的 2-3 个问题 */
+	reflectionQuestions: string[];
+	/** 关联思考：跨领域的知识关联提示 */
+	connections: string[];
 	/** 行动建议：听完能做什么（可选，不是每期都有） */
 	actionItems: ActionItem[];
 	/** 延伸阅读/资源：播客中提到的书、文章、工具等 */
@@ -35,6 +45,15 @@ export interface TopicCluster {
 	caseStartSeconds?: number;
 }
 
+export interface Quote {
+	/** 金句原文 */
+	text: string;
+	/** 发言人 */
+	speaker?: string;
+	/** 时间戳（秒） */
+	startSeconds?: number;
+}
+
 export interface ActionItem {
 	/** 行动建议内容 */
 	content: string;
@@ -58,6 +77,8 @@ export interface Resource {
  */
 export interface OutlineNode {
 	title: string;
+	/** 一句话摘要（仅顶层节点） */
+	summary?: string;
 	startSeconds?: number;
 	children?: OutlineNode[];
 }

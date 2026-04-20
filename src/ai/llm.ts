@@ -1,5 +1,5 @@
 import { requestUrl } from "obsidian";
-import type { InsightContext, LlmConfig, OutlineNode, PodcastInsights, TopicCluster, ActionItem, Resource } from "./llm-types";
+import type { InsightContext, LlmConfig, OutlineNode, PodcastInsights, TopicCluster, ActionItem, Resource, Quote } from "./llm-types";
 
 /**
  * 让 LLM 一次性返回全部结构化产出的 Prompt。
@@ -8,14 +8,16 @@ import type { InsightContext, LlmConfig, OutlineNode, PodcastInsights, TopicClus
 function buildSystemPrompt(): string {
 	return [
 		"你是一位专业的播客笔记整理助手，擅长从中文播客逐字稿中提炼可沉淀的知识。",
-		"你的任务是把一期播客的逐字稿转化为结构化的知识笔记。",
+		"你的任务是把一期播客的逐字稿转化为结构化的知识笔记，帮助听众真正吸收和内化知识。",
 		"",
 		"你必须以严格的 JSON 格式输出，不要包含任何额外文字、注释或 Markdown 代码块标记。",
 		"",
 		"输出 JSON 结构：",
 		"{",
 		'  "summary": string, // 3-5 句话的摘要，聚焦"这期播客讲了什么、核心观点是什么"',
-		'  "topics": [ // 按讨论话题分组的核心观点（重点！把概念和案例关联在一起）',
+		'  "core_thesis": string, // 用一句话概括整期播客最想传达的核心论点（类似"一句话卖点"）',
+		'  "topic_flow": string, // 描述各话题之间的逻辑关系，用箭头表示递进（如"问题背景 → 概念定义 → 案例验证 → 方法论 → 行动指南"）',
+		'  "topics": [ // 按逻辑递进顺序排列的核心话题（不是按时间！要体现思维链条）',
 		"    {",
 		'      "title": string, // 话题标题（如"第一性原理思维"）',
 		'      "insight": string, // 核心观点或概念的清晰解释（1-3 句话）',
@@ -25,6 +27,15 @@ function buildSystemPrompt(): string {
 		'      "case_start_seconds": number | null // 案例出现的时间戳（没有时为 null）',
 		"    }",
 		"  ],",
+		'  "quotes": [ // 播客中最精彩的 2-3 句金句原话（必须是逐字稿中的原文，不要改写）',
+		"    {",
+		'      "text": string, // 金句原文',
+		'      "speaker": string | null, // 发言人（如有）',
+		'      "start_seconds": number // 出现的时间戳',
+		"    }",
+		"  ],",
+		'  "reflection_questions": string[], // 2-3 个帮助听众深度思考的问题（布鲁姆认知层次的分析/评价/创造层，如"如果你要用这个方法解决你当前的问题，第一步会做什么？"）',
+		'  "connections": string[], // 1-2 个跨领域知识关联提示（如"这个观点和查理·芒格的多元思维模型有异曲同工之处"）',
 		'  "action_items": [ // 听完可以做的事（可选，不是每期都有，没有就给空数组）',
 		"    {",
 		'      "content": string, // 具体的行动建议',
@@ -42,6 +53,7 @@ function buildSystemPrompt(): string {
 		'  "outline": [ // 结构化大纲，体现节目的话题分段',
 		"    {",
 		'      "title": string,',
+		'      "summary": string, // 一句话概括本章内容（仅顶层节点需要）',
 		'      "start_seconds": number,',
 		'      "children": [ { "title": string, "start_seconds": number } ] // 可选，最多两层',
 		"    }",
@@ -50,15 +62,19 @@ function buildSystemPrompt(): string {
 		"}",
 		"",
 		"重要要求：",
-		"1. topics 是核心输出。按播客讨论的话题来组织，每个话题包含「核心观点」和「佐证案例」。",
-		"   概念和案例应该天然关联——不要把概念和案例割裂到不同数组里。",
-		"2. 如果一个话题有多个案例，只保留最有代表性的那一个。",
-		"3. 每个 start_seconds 必须是从逐字稿时间戳中提取的真实数字，不要编造。",
-		"4. action_items：只提取节目中明确建议的行动，不要自己编造建议。没有就给空数组。",
-		"5. resources：只提取节目中明确提到名字的资源，不要猜测或补充。没有就给空数组。",
-		"6. 如果用户提供了已有标签列表，优先从已有标签中选择合适的，没有合适的再新建。",
-		"7. 所有文本使用中文，保持简洁专业。",
-		"8. 严禁输出 ```json 或 ``` 等代码块包裹，直接输出 JSON 对象。",
+		"1. topics 是核心输出。必须按逻辑递进顺序排列（不是按时间顺序），体现从「是什么 → 为什么 → 怎么做」的思维链条。",
+		"   每个话题包含「核心观点」和「佐证案例」，概念和案例天然关联。",
+		"2. core_thesis 是全集的「一句话总结」，topic_flow 是话题之间的逻辑脉络，两者配合让读者瞬间抓住主线。",
+		"3. quotes 必须是逐字稿中的原话，不要改写或美化。选择最有洞察力、最令人印象深刻的句子。",
+		"4. reflection_questions 要引导深度思考，不要问「你觉得这期节目怎么样」这类浅层问题。",
+		"5. connections 要提供有意义的跨领域关联，帮助读者将新知识与已有知识体系建立连接。",
+		"6. 每个 start_seconds 必须是从逐字稿时间戳中提取的真实数字，不要编造。",
+		"7. action_items：只提取节目中明确建议的行动，不要自己编造建议。没有就给空数组。",
+		"8. resources：只提取节目中明确提到名字的资源，不要猜测或补充。没有就给空数组。",
+		"9. outline 的顶层节点必须包含 summary 字段，用一句话概括该段落的核心内容。",
+		"10. 如果用户提供了已有标签列表，优先从已有标签中选择合适的，没有合适的再新建。",
+		"11. 所有文本使用中文，保持简洁专业。",
+		"12. 严禁输出 ```json 或 ``` 等代码块包裹，直接输出 JSON 对象。",
 	].join("\n");
 }
 
@@ -198,15 +214,33 @@ function normalizeInsights(raw: unknown): PodcastInsights {
 
 	const mapOutline = (x: Record<string, unknown>): OutlineNode => ({
 		title: String(x.title || "").trim(),
+		summary: x.summary ? String(x.summary).trim() : undefined,
 		startSeconds: parseSec(x.start_seconds, x.startSeconds),
 		children: arr<Record<string, unknown>>(x.children).map(mapOutline),
 	});
 
+	const mapQuote = (x: Record<string, unknown>): Quote => ({
+		text: String(x.text || "").trim(),
+		speaker: x.speaker ? String(x.speaker).trim() : undefined,
+		startSeconds: parseSec(x.start_seconds, x.startSeconds),
+	});
+
 	return {
 		summary: String(r.summary || "").trim(),
+		coreThesis: String(r.core_thesis || r.coreThesis || "").trim(),
+		topicFlow: String(r.topic_flow || r.topicFlow || "").trim(),
 		topics: arr<Record<string, unknown>>(r.topics)
 			.map(mapTopic)
 			.filter((it) => it.title && it.insight),
+		quotes: arr<Record<string, unknown>>(r.quotes)
+			.map(mapQuote)
+			.filter((it) => it.text),
+		reflectionQuestions: arr<string>(r.reflection_questions || r.reflectionQuestions)
+			.map((q) => String(q).trim())
+			.filter(Boolean),
+		connections: arr<string>(r.connections)
+			.map((c) => String(c).trim())
+			.filter(Boolean),
 		actionItems: arr<Record<string, unknown>>(r.action_items || r.actionItems)
 			.map(mapAction)
 			.filter((it) => it.content),

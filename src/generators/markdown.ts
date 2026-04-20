@@ -1,5 +1,5 @@
 import type { PodcastMetadata } from "../parsers/types";
-import type { PodcastInsights, TopicCluster, OutlineNode } from "../ai/llm-types";
+import type { PodcastInsights, TopicCluster, OutlineNode, Quote } from "../ai/llm-types";
 import type { TranscriptionResult, TranscriptSegment } from "../ai/types";
 
 /**
@@ -89,10 +89,55 @@ export function renderNote(
 	if (insights.topics.length > 0) {
 		lines.push("## 💡 核心观点");
 		lines.push("");
-		for (const topic of insights.topics) {
-			lines.push(...renderTopic(topic));
+
+		// 核心论点（一句话）
+		if (insights.coreThesis) {
+			lines.push(`> [!tip] 核心论点`);
+			lines.push(`> ${insights.coreThesis}`);
 			lines.push("");
 		}
+
+		// 知识脉络（话题逻辑链）
+		if (insights.topicFlow) {
+			lines.push(`**知识脉络：** ${insights.topicFlow}`);
+			lines.push("");
+		}
+
+		// 编号化的话题（体现递进）
+		for (let i = 0; i < insights.topics.length; i++) {
+			lines.push(...renderTopic(insights.topics[i], i + 1));
+			lines.push("");
+		}
+	}
+
+	// ===== 金句 =====
+	if (insights.quotes.length > 0) {
+		lines.push("## 💬 金句");
+		lines.push("");
+		for (const q of insights.quotes) {
+			lines.push(...renderQuote(q));
+			lines.push("");
+		}
+	}
+
+	// ===== 反思问题 =====
+	if (insights.reflectionQuestions.length > 0) {
+		lines.push("## 🤔 反思问题");
+		lines.push("");
+		for (const q of insights.reflectionQuestions) {
+			lines.push(`> [!question] ${q}`);
+			lines.push("");
+		}
+	}
+
+	// ===== 关联思考 =====
+	if (insights.connections.length > 0) {
+		lines.push("## 🔗 关联思考");
+		lines.push("");
+		for (const c of insights.connections) {
+			lines.push(`- ${c}`);
+		}
+		lines.push("");
 	}
 
 	// ===== 行动建议（可选） =====
@@ -129,6 +174,12 @@ export function renderNote(
 
 	// ===== 我的标记（空占位，供用户手动添加） =====
 	lines.push("## 🔖 我的标记");
+	lines.push("");
+
+	// ===== 我的理解（费曼检验区） =====
+	lines.push("## ✏️ 我的理解");
+	lines.push("");
+	lines.push("> 用自己的话复述这期播客的核心观点，检验是否真正理解了。");
 	lines.push("");
 
 	// ===== 逐字稿（默认折叠） =====
@@ -169,13 +220,13 @@ function tsLink(seconds: number): string {
 }
 
 /**
- * 渲染一个话题聚类：核心观点 + 案例佐证（如果有）。
+ * 渲染一个话题聚类：编号 + 核心观点 + 案例佐证合并在同一 callout 中。
  */
-function renderTopic(topic: TopicCluster): string[] {
+function renderTopic(topic: TopicCluster, index: number): string[] {
 	const out: string[] = [];
 
-	// 核心观点 callout
-	out.push(`> [!abstract] ${topic.title}`);
+	// 核心观点 callout（带编号）
+	out.push(`> [!abstract] ${index}. ${topic.title}`);
 	for (const line of topic.insight.split("\n")) {
 		out.push(`> ${line}`);
 	}
@@ -183,10 +234,11 @@ function renderTopic(topic: TopicCluster): string[] {
 		out.push(`> ⏱️ ${tsLink(topic.startSeconds)}`);
 	}
 
-	// 案例佐证 callout（紧跟在观点后面）
+	// 案例佐证（合并在同一 callout 内，用分隔线区分）
 	if (topic.caseContent) {
-		out.push("");
-		out.push(`> [!example] ${topic.caseTitle || "案例"}`);
+		out.push(`>`);
+		out.push(`> ---`);
+		out.push(`> 📌 **案例：${topic.caseTitle || "案例"}**`);
 		for (const line of topic.caseContent.split("\n")) {
 			out.push(`> ${line}`);
 		}
@@ -210,13 +262,41 @@ function resourceIcon(type: string): string {
 	return RESOURCE_ICONS[type] || "🔗";
 }
 
+/**
+ * 渲染金句：blockquote + 发言人署名。
+ */
+function renderQuote(quote: Quote): string[] {
+	const out: string[] = [];
+	const ts = quote.startSeconds !== undefined ? ` ${tsLink(quote.startSeconds)}` : "";
+	out.push(`> "${quote.text}"`);
+	const speaker = quote.speaker ? ` —— ${quote.speaker}` : "";
+	out.push(`>${speaker}${ts}`);
+	return out;
+}
+
+/**
+ * 渲染大纲：顶层有序列表，时间戳前置加粗，附一句话摘要。
+ */
 function renderOutline(nodes: OutlineNode[], depth: number): string[] {
 	const out: string[] = [];
 	const indent = "  ".repeat(depth);
-	for (const node of nodes) {
+	for (let i = 0; i < nodes.length; i++) {
+		const node = nodes[i];
 		const ts =
-			node.startSeconds !== undefined ? ` (${tsLink(node.startSeconds)})` : "";
-		out.push(`${indent}- ${node.title}${ts}`);
+			node.startSeconds !== undefined ? `**${tsLink(node.startSeconds)}**` : "";
+		if (depth === 0) {
+			// 顶层：有序列表 + 时间戳前置 + 标题
+			const prefix = ts ? `${ts} ` : "";
+			out.push(`${i + 1}. ${prefix}${node.title}`);
+			// 顶层节点附摘要（斜体）
+			if (node.summary) {
+				out.push(`   *${node.summary}*`);
+			}
+		} else {
+			// 子层：无序列表
+			const tsStr = ts ? ` (${ts})` : "";
+			out.push(`${indent}- ${node.title}${tsStr}`);
+		}
 		if (node.children && node.children.length > 0) {
 			out.push(...renderOutline(node.children, depth + 1));
 		}
@@ -225,7 +305,7 @@ function renderOutline(nodes: OutlineNode[], depth: number): string[] {
 }
 
 /**
- * 渲染逐字稿：合并相邻短段，避免每 3 秒一行；时间戳可点击跳转。
+ * 渲染逐字稿：合并相邻短段；不同发言人之间插入空行；发言人名称加粗。
  */
 function renderTranscript(segments: TranscriptSegment[]): string[] {
 	const out: string[] = [];
@@ -233,12 +313,17 @@ function renderTranscript(segments: TranscriptSegment[]): string[] {
 	let bucketStart = segments[0].start;
 	let bucketSpeaker = segments[0].speaker;
 	let bucketText = "";
+	let lastFlushedSpeaker: string | undefined;
 
 	const flush = () => {
 		if (!bucketText.trim()) return;
-		const speaker = bucketSpeaker ? `${bucketSpeaker}：` : "";
-		out.push(`**${tsLink(bucketStart)}** ${speaker}${bucketText.trim()}`);
-		out.push("");
+		// 不同发言人之间插入空行
+		if (lastFlushedSpeaker !== undefined && bucketSpeaker !== lastFlushedSpeaker) {
+			out.push("");
+		}
+		const speaker = bucketSpeaker ? `**${bucketSpeaker}：** ` : "";
+		out.push(`${tsLink(bucketStart)} ${speaker}${bucketText.trim()}`);
+		lastFlushedSpeaker = bucketSpeaker;
 	};
 
 	for (const seg of segments) {
