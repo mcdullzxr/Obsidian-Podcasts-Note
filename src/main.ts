@@ -11,6 +11,7 @@ import { PodcastPlayerView, PLAYER_VIEW_TYPE } from "./views/player-view";
 import type { EpisodeInfo } from "./views/player-view";
 import { registerTimestampProcessor, activatePlayerView } from "./views/timestamp-processor";
 import { registerBookmarkCommand } from "./views/bookmark-command";
+import { renderCanvas } from "./generators/canvas";
 
 /**
  * 插件设置项
@@ -50,6 +51,8 @@ interface PodcastNoteSettings {
 	embedAudioPlayer: boolean;
 	/** 首次启用下载开关时弹同步排除提醒的一次性标记 */
 	hasShownAudioSyncTip: boolean;
+	/** 生成笔记时同步生成 Canvas 脑图（默认关） */
+	generateCanvas: boolean;
 }
 
 const DEFAULT_SETTINGS: PodcastNoteSettings = {
@@ -75,6 +78,7 @@ const DEFAULT_SETTINGS: PodcastNoteSettings = {
 	downloadAudioLocal: false,
 	embedAudioPlayer: true,
 	hasShownAudioSyncTip: false,
+	generateCanvas: false,
 };
 
 export default class PodcastNotePlugin extends Plugin {
@@ -185,6 +189,15 @@ export default class PodcastNotePlugin extends Plugin {
 			},
 		});
 
+		// 为当前笔记按需生成 Canvas 脑图
+		this.addCommand({
+			id: "generate-canvas",
+			name: "为当前播客笔记生成 Canvas 脑图",
+			callback: () => {
+				this.generateCanvasForCurrentNote();
+			},
+		});
+
 		// 设置面板
 		this.addSettingTab(new PodcastNoteSettingTab(this.app, this));
 
@@ -273,6 +286,7 @@ export default class PodcastNotePlugin extends Plugin {
 			"语音转录",
 			"AI 提炼",
 			"写入笔记",
+			...(this.settings.generateCanvas ? ["生成脑图"] : []),
 		]);
 
 		// ========= 1. 解析元数据 =========
@@ -383,6 +397,33 @@ export default class PodcastNotePlugin extends Plugin {
 				remoteAudioUrl: meta.audioUrl,
 			});
 			const file = await this.writeNote(meta, body);
+
+			// ========= 6. 可选：生成 Canvas 脑图 =========
+			if (this.settings.generateCanvas) {
+				progress.advance("🗺️ 正在生成 Canvas 脑图…");
+				try {
+					const canvasContent = renderCanvas(meta, insights);
+					const canvasPath = file.path.replace(/\.md$/, ".canvas");
+					const existing = this.app.vault.getAbstractFileByPath(canvasPath);
+					if (existing instanceof TFile) {
+						await this.app.vault.modify(existing, canvasContent);
+					} else {
+						await this.app.vault.create(canvasPath, canvasContent);
+					}
+					// 在笔记顶部插入脑图链接
+					const mdContent = await this.app.vault.read(file);
+					const canvasBasename = canvasPath.split("/").pop()!;
+					if (!mdContent.includes(canvasBasename)) {
+						await this.app.vault.modify(file, insertCanvasLink(mdContent, canvasBasename));
+					}
+					progress.detail(`脑图已保存：${canvasPath}`);
+				} catch (err) {
+					const msg = err instanceof Error ? err.message : String(err);
+					progress.detail(`⚠️ 脑图生成失败（不影响主流程）：${msg}`);
+					console.error("[Podcast Note] 脑图生成失败:", err);
+				}
+			}
+
 			progress.finish(`🎉 笔记已生成：${file.path}`);
 
 			// 打开笔记
@@ -448,6 +489,7 @@ export default class PodcastNotePlugin extends Plugin {
 			"读取缓存",
 			"AI 提炼",
 			"覆盖笔记",
+			...(this.settings.generateCanvas ? ["生成脑图"] : []),
 		]);
 
 		progress.advance("♻️ 已加载转录缓存");
@@ -491,9 +533,127 @@ export default class PodcastNotePlugin extends Plugin {
 				remoteAudioUrl: fm.audio_url || undefined,
 			});
 			await this.app.vault.modify(activeFile, body);
+
+			// ========= 可选：同步生成 Canvas 脑图 =========
+			if (this.settings.generateCanvas) {
+				progress.advance("🗺️ 正在生成 Canvas 脑图…");
+				try {
+					const canvasContent = renderCanvas(meta, insights);
+					const canvasPath = activeFile.path.replace(/\.md$/, ".canvas");
+					const existing = this.app.vault.getAbstractFileByPath(canvasPath);
+					if (existing instanceof TFile) {
+						await this.app.vault.modify(existing, canvasContent);
+					} else {
+						await this.app.vault.create(canvasPath, canvasContent);
+					}
+					// 如果笔记中还没有脑图链接，插入一个
+					const refreshed = await this.app.vault.read(activeFile);
+					const canvasBasename = canvasPath.split("/").pop()!;
+					if (!refreshed.includes(canvasBasename)) {
+						await this.app.vault.modify(activeFile, insertCanvasLink(refreshed, canvasBasename));
+					}
+					progress.detail(`脑图已保存：${canvasPath}`);
+				} catch (err) {
+					const msg = err instanceof Error ? err.message : String(err);
+					progress.detail(`⚠️ 脑图生成失败（不影响主流程）：${msg}`);
+					console.error("[Podcast Note] 脑图生成失败:", err);
+				}
+			}
+
 			progress.finish(`🎉 笔记已重新生成：${activeFile.path}`);
 		} catch (err) {
 			progress.error("笔记写入失败", err);
+		}
+	}
+
+	/**
+	 * 为当前笔记按需生成 Canvas 脑图。
+	 * 需要已有转录缓存；无缓存时提示用户先生成笔记。
+	 */
+	private async generateCanvasForCurrentNote(): Promise<void> {
+		const activeFile = this.app.workspace.getActiveFile();
+		if (!activeFile || activeFile.extension !== "md") {
+			new Notice("请先打开一篇播客笔记");
+			return;
+		}
+
+		const cache = this.app.metadataCache.getFileCache(activeFile);
+		const fm = cache?.frontmatter;
+		if (!fm || !fm.source) {
+			new Notice("当前笔记没有播客元数据（缺少 source 字段）");
+			return;
+		}
+
+		const meta: PodcastMetadata = {
+			title: fm.title || activeFile.basename,
+			podcastName: fm.podcast || "",
+			publishDate: fm.date || new Date().toISOString().slice(0, 10),
+			duration: fm.duration,
+			description: "",
+			audioUrl: fm.audio_url || "",
+			sourceUrl: fm.source,
+			platform: this.detectPlatform(fm.source),
+		};
+
+		const episodeId = getEpisodeId(meta);
+		const transcript = await getCachedTranscript(this.app.vault, episodeId);
+		if (!transcript) {
+			new Notice("未找到转录缓存，请先用「从播客链接生成笔记」完整生成一次。");
+			return;
+		}
+
+		const progress = new ProgressNotice(["读取缓存", "AI 提炼", "生成脑图"]);
+		progress.advance("♻️ 已加载转录缓存");
+		progress.detail(`${transcript.segments.length} 段`);
+
+		progress.advance("🧠 正在提炼知识点…");
+		let insights;
+		try {
+			insights = await generateInsights(
+				{
+					podcastName: meta.podcastName,
+					episodeTitle: meta.title,
+					description: meta.description,
+					transcriptWithTimestamps: segmentsToPromptText(transcript.segments),
+					existingTags: this.collectExistingTags(),
+				},
+				{
+					protocol: this.settings.llmProtocol,
+					apiKey: this.settings.llmApiKey,
+					baseUrl: this.settings.llmBaseUrl,
+					model: this.settings.llmModel,
+					maxTokens: this.settings.llmMaxTokens,
+				}
+			);
+		} catch (err) {
+			progress.error("AI 提炼失败", err);
+			return;
+		}
+
+		progress.advance("🗺️ 正在生成脑图…");
+		try {
+			const canvasContent = renderCanvas(meta, insights);
+			const canvasPath = activeFile.path.replace(/\.md$/, ".canvas");
+			const existing = this.app.vault.getAbstractFileByPath(canvasPath);
+			if (existing instanceof TFile) {
+				await this.app.vault.modify(existing, canvasContent);
+			} else {
+				await this.app.vault.create(canvasPath, canvasContent);
+			}
+			// 在笔记顶部插入脑图链接（已有则跳过）
+			const mdContent = await this.app.vault.read(activeFile);
+			const canvasBasename = canvasPath.split("/").pop()!;
+			if (!mdContent.includes(canvasBasename)) {
+				await this.app.vault.modify(activeFile, insertCanvasLink(mdContent, canvasBasename));
+			}
+			progress.finish(`🎉 脑图已生成：${canvasPath}`);
+			// 分栏打开 Canvas
+			const canvasFile = this.app.vault.getAbstractFileByPath(canvasPath);
+			if (canvasFile instanceof TFile) {
+				this.app.workspace.getLeaf("split").openFile(canvasFile);
+			}
+		} catch (err) {
+			progress.error("脑图生成失败", err);
 		}
 	}
 
@@ -571,6 +731,31 @@ export default class PodcastNotePlugin extends Plugin {
 	): boolean {
 		return uiProvider === "volcengine" || uiProvider === "dashscope";
 	}
+}
+
+/**
+ * 在 Markdown 内容的 frontmatter 结尾处插入 Canvas 脑图链接。
+ * 找到第二个 '---' 行，在其后插入链接行。
+ */
+function insertCanvasLink(mdContent: string, canvasBasename: string): string {
+	const lines = mdContent.split("\n");
+	let dashCount = 0;
+	let insertAfterLine = -1;
+	for (let i = 0; i < lines.length; i++) {
+		if (lines[i].trim() === "---") {
+			dashCount++;
+			if (dashCount === 2) {
+				insertAfterLine = i + 1;
+				break;
+			}
+		}
+	}
+	if (insertAfterLine === -1) {
+		// 没有 frontmatter，直接前置
+		return `[[${canvasBasename}|🗺️ 打开脑图]]\n\n${mdContent}`;
+	}
+	lines.splice(insertAfterLine, 0, "", `[[${canvasBasename}|🗺️ 打开脑图]]`);
+	return lines.join("\n");
 }
 
 /**
@@ -1025,6 +1210,16 @@ class PodcastNoteSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(this.plugin.settings.includeTranscript).onChange(async (value) => {
 					this.plugin.settings.includeTranscript = value;
+					await this.plugin.saveSettings();
+				})
+			);
+
+		new Setting(containerEl)
+			.setName("同步生成 Canvas 脑图")
+			.setDesc("生成笔记时同步生成同名 .canvas 脑图文件，并在笔记顶部插入链接。也可通过命令「为当前播客笔记生成 Canvas 脑图」按需生成。")
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.generateCanvas).onChange(async (value) => {
+					this.plugin.settings.generateCanvas = value;
 					await this.plugin.saveSettings();
 				})
 			);
