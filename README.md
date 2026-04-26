@@ -1,4 +1,6 @@
-# Podcast Note — Obsidian 播客笔记插件
+# Podvault — 播客知识金库 · Obsidian 插件
+
+> **Turn podcasts into a searchable knowledge vault.**
 
 把播客从"听过就忘"变成**可搜索、可关联、可复习**的知识资产。
 
@@ -112,14 +114,14 @@ LLM 一次性生成以下结构化内容，全部带精确时间戳：
 ```bash
 # 1. 克隆到你的 Vault 插件目录
 cd /path/to/vault/.obsidian/plugins
-git clone https://github.com/your-username/podcast-note
-cd podcast-note
+git clone https://github.com/mcdull/obsidian-podvault podvault
+cd podvault
 
 # 2. 安装依赖并构建
 npm install
 npm run build
 
-# 3. 在 Obsidian 设置 → 社区插件 → 已安装插件 中启用 Podcast Note
+# 3. 在 Obsidian 设置 → 社区插件 → 已安装插件 中启用 Podvault
 ```
 
 ### 开发模式
@@ -134,7 +136,7 @@ npm run dev   # 监听文件变化，自动重建
 
 ## ⚙️ 配置
 
-插件安装后，进入 **Obsidian 设置 → Podcast Note** 完成以下配置：
+插件安装后，进入 **Obsidian 设置 → Podvault** 完成以下配置：
 
 1. **转录服务商**：选择 OpenAI / 火山引擎 / 阿里云百炼，填入对应 API Key
 2. **LLM 服务商**：填入 API Key、Base URL、模型名称
@@ -146,7 +148,7 @@ npm run dev   # 监听文件变化，自动重建
 ## 📂 项目结构
 
 ```
-podcast-note/
+podvault/
 ├── src/
 │   ├── main.ts                    # 插件入口、设置面板、命令注册
 │   ├── parsers/
@@ -201,6 +203,22 @@ podcast-note/
 
 ---
 
-## 📄 License
+## � 从旧版本迁移（Podcast Note → Podvault）
+
+如果你之前安装过本插件的旧版本（id 为 `podcast-note`），需要手动改一下目录名：
+
+```bash
+# 进入你的 Vault 插件目录
+cd /path/to/vault/.obsidian/plugins
+
+# 把旧目录改名（保留你已有的设置和数据）
+mv podcast-note podvault
+```
+
+然后在 Obsidian 中重新加载插件即可。已生成的笔记 frontmatter 中的 `cssclasses: [podcast-note]` 仍然兼容，无需改动。
+
+---
+
+## �📄 License
 
 MIT

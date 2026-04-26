@@ -1,7 +1,7 @@
 {
-	"name": "obsidian-podcast-note",
+	"name": "obsidian-podvault",
 	"version": "0.1.0",
-	"description": "Turn podcasts into searchable knowledge notes in Obsidian.",
+	"description": "Podvault — Turn podcasts into a searchable knowledge vault in Obsidian.",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
@@ -16,7 +16,7 @@
 		"ai",
 		"knowledge-management"
 	],
-	"author": "45084",
+	"author": "mcdull",
 	"license": "MIT",
 	"devDependencies": {
 		"@types/node": "^16.11.6",

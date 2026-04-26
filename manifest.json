@@ -1,10 +1,10 @@
 {
-	"id": "podcast-note",
-	"name": "Podcast Note",
+	"id": "podvault",
+	"name": "Podvault",
 	"version": "0.1.0",
 	"minAppVersion": "1.4.0",
-	"description": "把播客变成可搜索、可关联的知识笔记：粘贴小宇宙/RSS/Spotify 链接，自动生成逐字稿、摘要、知识点和大纲。",
-	"author": "45084",
+	"description": "Podvault — 把播客存进你的知识金库：粘贴小宇宙/RSS/Spotify 链接，自动生成逐字稿、摘要、知识点和大纲，直接入库 Obsidian。",
+	"author": "mcdull",
 	"authorUrl": "",
 	"isDesktopOnly": false
 }

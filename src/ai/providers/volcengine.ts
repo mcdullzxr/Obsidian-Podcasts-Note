@@ -60,7 +60,7 @@ export async function transcribeVolcengine(
 			"Content-Type": "application/json",
 		},
 		body: JSON.stringify({
-			user: { uid: "obsidian-podcast-note" },
+			user: { uid: "obsidian-podvault" },
 			audio: {
 				format,
 				url: audioUrl,

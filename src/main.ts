@@ -314,7 +314,7 @@ export default class PodcastNotePlugin extends Plugin {
 				// 下载失败不阻断主流程，降级为纯文本时间戳
 				const msg = err instanceof Error ? err.message : String(err);
 				progress.detail(`⚠️ 音频下载失败，回退到远程播放：${msg}`);
-				console.error("[Podcast Note] 音频下载失败:", err);
+				console.error("[Podvault] 音频下载失败:", err);
 			}
 		} else {
 			progress.skip(); // 跳过"下载音频到本地"这一步
@@ -355,7 +355,7 @@ export default class PodcastNotePlugin extends Plugin {
 			try {
 				await saveCachedTranscript(this.app.vault, episodeId, transcript);
 			} catch (e) {
-				console.warn("[Podcast Note] 缓存保存失败（不影响主流程）:", e);
+				console.warn("[Podvault] 缓存保存失败（不影响主流程）:", e);
 			}
 			progress.detail(`转录完成（${transcript.segments.length} 段）`);
 		}
@@ -420,7 +420,7 @@ export default class PodcastNotePlugin extends Plugin {
 				} catch (err) {
 					const msg = err instanceof Error ? err.message : String(err);
 					progress.detail(`⚠️ 脑图生成失败（不影响主流程）：${msg}`);
-					console.error("[Podcast Note] 脑图生成失败:", err);
+					console.error("[Podvault] 脑图生成失败:", err);
 				}
 			}
 
@@ -556,7 +556,7 @@ export default class PodcastNotePlugin extends Plugin {
 				} catch (err) {
 					const msg = err instanceof Error ? err.message : String(err);
 					progress.detail(`⚠️ 脑图生成失败（不影响主流程）：${msg}`);
-					console.error("[Podcast Note] 脑图生成失败:", err);
+					console.error("[Podvault] 脑图生成失败:", err);
 				}
 			}
 
@@ -805,7 +805,7 @@ class ProgressNotice {
 		this.notice.hide();
 		const msg = err instanceof Error ? err.message : String(err);
 		new Notice(`${prefix}：${msg}`, 8000);
-		console.error(`[Podcast Note] ${prefix}:`, err);
+		console.error(`[Podvault] ${prefix}:`, err);
 	}
 
 	private render(message?: string) {
@@ -814,7 +814,7 @@ class ProgressNotice {
 
 		// 标题
 		const titleEl = el.createEl("div", { cls: "progress-title" });
-		titleEl.textContent = "Podcast Note 生成中…";
+		titleEl.textContent = "Podvault 生成中…";
 
 		// 进度条
 		const barOuter = el.createEl("div", { cls: "progress-bar-outer" });
@@ -920,7 +920,7 @@ class PodcastNoteSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 
-		containerEl.createEl("h2", { text: "Podcast Note 设置" });
+		containerEl.createEl("h2", { text: "Podvault 设置" });
 		containerEl.createEl("p", {
 			text: "本插件采用 BYOK（Bring Your Own Key）模式：您需要提供自己的 AI 服务 API Key。插件不会上传或代理任何数据。",
 			cls: "setting-item-description",
