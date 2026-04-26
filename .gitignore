@@ -31,3 +31,22 @@ Thumbs.db
 # Obsidian plugin dev
 # ========================
 data.json
+
+# === xiaohongshu marketing assets (local only) ===
+docs/xhs/
+docs/xhs/dist/
+scripts/capture-xhs.mjs
+
+# === draft covers ===
+docs/cover-v1-magazine.html
+docs/cover-v2-terminal.html
+docs/cover-compare.html
+
+# === puppeteer config ===
+.npmrc
+
+# === temp logs ===
+install.log
+
+# === user notes (not tracked) ===
+图文笔记/
