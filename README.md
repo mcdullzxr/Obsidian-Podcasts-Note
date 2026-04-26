@@ -114,7 +114,7 @@ LLM 一次性生成以下结构化内容，全部带精确时间戳：
 ```bash
 # 1. 克隆到你的 Vault 插件目录
 cd /path/to/vault/.obsidian/plugins
-git clone https://github.com/mcdull/obsidian-podvault podvault
+git clone https://github.com/mcdullzxr/obsidian-podvault podvault
 cd podvault
 
 # 2. 安装依赖并构建
